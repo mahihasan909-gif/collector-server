@@ -1,13 +1,12 @@
 const express = require('express');
-const fs = require('fs');
-const path = require('path');
 const crypto = require('crypto');
+const { MongoClient } = require('mongodb');
 
 const PORT = process.env.PORT || 4000;
 const API_KEY = process.env.API_KEY || '';
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
 const ALLOWED_DEPT = process.env.ALLOWED_DEPT_CODE || '60'; // e.g. 60 = CSE; empty = allow all
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const MONGODB_URI = process.env.MONGODB_URI || '';
 
 if (!API_KEY || !ADMIN_KEY) {
   console.error(
@@ -18,15 +17,23 @@ if (!API_KEY || !ADMIN_KEY) {
   process.exit(1);
 }
 
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+if (!MONGODB_URI) {
+  console.error(
+    'Refusing to start with no MONGODB_URI set. Create a free MongoDB Atlas cluster and set ' +
+      'MONGODB_URI=mongodb+srv://user:pass@cluster.mongodb.net/?retryWrites=true&w=majority'
+  );
+  process.exit(1);
+}
 
-const app = express();
-app.use(express.json({ limit: '10mb' }));
+let sessionsCol;
 
-function studentDir(id) {
-  const dir = path.join(DATA_DIR, safeName(id));
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  return dir;
+async function connectDb() {
+  const client = new MongoClient(MONGODB_URI);
+  await client.connect();
+  const db = client.db('student_tracker');
+  sessionsCol = db.collection('sessions');
+  await sessionsCol.createIndex({ studentId: 1, sessionId: 1 }, { unique: true });
+  console.log('Connected to MongoDB.');
 }
 
 function safeName(name) {
@@ -48,10 +55,10 @@ function csvEscape(v) {
   return s;
 }
 
-function buildCodeCsv(pkg) {
+function buildCodeCsvRows(pkg) {
   const events = pkg.events || [];
   const files = pkg.files || [];
-  const rows = [CODE_CSV_COLUMNS.join(',')];
+  const rows = [];
   for (const f of files) {
     const fileEvents = events.filter((e) => e.file === f.path);
     let addedCharsTotal = 0, removedCharsTotal = 0, keystrokeCount = 0;
@@ -73,11 +80,18 @@ function buildCodeCsv(pkg) {
       addedCharsTotal, removedCharsTotal, idleEventCount, tabSwitchCount, csvEscape(f.content)
     ].join(','));
   }
-  return rows.join('\n');
+  return rows;
 }
 
+function buildCodeCsv(pkg) {
+  return [CODE_CSV_COLUMNS.join(','), ...buildCodeCsvRows(pkg)].join('\n');
+}
+
+const app = express();
+app.use(express.json({ limit: '10mb' }));
+
 // --- extension upload: one full session package per login/logout cycle ---
-app.post('/session', (req, res) => {
+app.post('/session', async (req, res) => {
   if (API_KEY && req.header('X-API-Key') !== API_KEY) {
     return res.status(401).json({ error: 'bad api key' });
   }
@@ -89,22 +103,11 @@ app.post('/session', (req, res) => {
     return res.status(403).json({ error: `dept code ${pkg.deptCode} not accepted here (expected ${ALLOWED_DEPT})` });
   }
 
-  const dir = studentDir(pkg.studentId);
-  fs.writeFileSync(path.join(dir, `${safeName(pkg.sessionId)}.json`), JSON.stringify(pkg), 'utf8');
-  fs.writeFileSync(path.join(dir, `${safeName(pkg.sessionId)}_code.csv`), buildCodeCsv(pkg), 'utf8');
-
-  const indexPath = path.join(dir, 'index.json');
-  const index = fs.existsSync(indexPath) ? JSON.parse(fs.readFileSync(indexPath, 'utf8')) : [];
-  index.push({
-    sessionId: pkg.sessionId,
-    deptCode: pkg.deptCode || '',
-    machineId: pkg.machineId,
-    loginAt: pkg.loginAt,
-    logoutAt: pkg.logoutAt,
-    eventCount: (pkg.events || []).length,
-    fileCount: (pkg.files || []).length
-  });
-  fs.writeFileSync(indexPath, JSON.stringify(index, null, 2), 'utf8');
+  await sessionsCol.updateOne(
+    { studentId: pkg.studentId, sessionId: pkg.sessionId },
+    { $set: pkg },
+    { upsert: true }
+  );
 
   res.json({ ok: true });
 });
@@ -113,7 +116,7 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 
 // --- admin/teacher panel: simple cookie-based login, no key-in-URL needed ---
 const COOKIE_NAME = 'tracker_admin';
-const sessions = new Set();
+const adminSessions = new Set();
 
 function parseCookies(req) {
   const header = req.headers.cookie || '';
@@ -128,7 +131,7 @@ function parseCookies(req) {
 
 function isAuthed(req) {
   const cookies = parseCookies(req);
-  return Boolean(cookies[COOKIE_NAME] && sessions.has(cookies[COOKIE_NAME]));
+  return Boolean(cookies[COOKIE_NAME] && adminSessions.has(cookies[COOKIE_NAME]));
 }
 
 function checkAdmin(req, res, next) {
@@ -142,63 +145,72 @@ app.post('/admin/login', (req, res) => {
     return res.status(401).json({ error: 'wrong password' });
   }
   const token = crypto.randomBytes(24).toString('hex');
-  sessions.add(token);
+  adminSessions.add(token);
   res.setHeader('Set-Cookie', `${COOKIE_NAME}=${token}; HttpOnly; Path=/; Max-Age=43200; SameSite=Lax`);
   res.json({ ok: true });
 });
 
 app.post('/admin/logout', (req, res) => {
   const cookies = parseCookies(req);
-  sessions.delete(cookies[COOKIE_NAME]);
+  adminSessions.delete(cookies[COOKIE_NAME]);
   res.setHeader('Set-Cookie', `${COOKIE_NAME}=; Path=/; Max-Age=0`);
   res.json({ ok: true });
 });
 
-app.get('/api/students', checkAdmin, (req, res) => {
-  const ids = fs.readdirSync(DATA_DIR).filter((f) => fs.statSync(path.join(DATA_DIR, f)).isDirectory());
-  let students = ids.map((id) => {
-    const indexPath = path.join(DATA_DIR, id, 'index.json');
-    const sessions = fs.existsSync(indexPath) ? JSON.parse(fs.readFileSync(indexPath, 'utf8')) : [];
-    return {
-      studentId: id,
-      deptCode: sessions.length ? sessions[sessions.length - 1].deptCode || '' : '',
-      sessionCount: sessions.length,
-      lastActivity: sessions.length ? Math.max(...sessions.map((s) => s.logoutAt || 0)) : 0
-    };
-  });
+app.get('/api/students', checkAdmin, async (req, res) => {
+  const docs = await sessionsCol
+    .find({}, { projection: { studentId: 1, deptCode: 1, logoutAt: 1 } })
+    .toArray();
+  const byId = new Map();
+  for (const d of docs) {
+    const cur = byId.get(d.studentId) || { studentId: d.studentId, deptCode: d.deptCode || '', sessionCount: 0, lastActivity: 0 };
+    cur.sessionCount++;
+    cur.deptCode = d.deptCode || cur.deptCode;
+    cur.lastActivity = Math.max(cur.lastActivity, d.logoutAt || 0);
+    byId.set(d.studentId, cur);
+  }
+  let students = Array.from(byId.values());
   if (req.query.dept) {
     students = students.filter((s) => s.deptCode === req.query.dept);
   }
   res.json(students);
 });
 
-app.get('/api/students/:id/sessions', checkAdmin, (req, res) => {
-  const indexPath = path.join(DATA_DIR, safeName(req.params.id), 'index.json');
-  res.json(fs.existsSync(indexPath) ? JSON.parse(fs.readFileSync(indexPath, 'utf8')) : []);
+app.get('/api/students/:id/sessions', checkAdmin, async (req, res) => {
+  const docs = await sessionsCol
+    .find({ studentId: req.params.id })
+    .sort({ loginAt: -1 })
+    .toArray();
+  const out = docs.map((d) => ({
+    sessionId: d.sessionId,
+    deptCode: d.deptCode || '',
+    machineId: d.machineId,
+    loginAt: d.loginAt,
+    logoutAt: d.logoutAt,
+    eventCount: (d.events || []).length,
+    fileCount: (d.files || []).length
+  }));
+  res.json(out);
 });
 
-app.get('/api/students/:id/sessions/:sessionId', checkAdmin, (req, res) => {
-  const file = path.join(DATA_DIR, safeName(req.params.id), `${safeName(req.params.sessionId)}.json`);
-  if (!fs.existsSync(file)) return res.status(404).json({ error: 'not found' });
-  res.json(JSON.parse(fs.readFileSync(file, 'utf8')));
+app.get('/api/students/:id/sessions/:sessionId', checkAdmin, async (req, res) => {
+  const doc = await sessionsCol.findOne({ studentId: req.params.id, sessionId: req.params.sessionId });
+  if (!doc) return res.status(404).json({ error: 'not found' });
+  res.json(doc);
 });
 
-app.get('/api/students/:id/sessions/:sessionId/csv', checkAdmin, (req, res) => {
-  const file = path.join(DATA_DIR, safeName(req.params.id), `${safeName(req.params.sessionId)}_code.csv`);
-  if (!fs.existsSync(file)) return res.status(404).send('not found');
-  res.download(file);
+app.get('/api/students/:id/sessions/:sessionId/csv', checkAdmin, async (req, res) => {
+  const doc = await sessionsCol.findOne({ studentId: req.params.id, sessionId: req.params.sessionId });
+  if (!doc) return res.status(404).send('not found');
+  res.setHeader('Content-Disposition', `attachment; filename="${safeName(req.params.id)}_${safeName(req.params.sessionId)}_code.csv"`);
+  res.type('text/csv').send(buildCodeCsv(doc));
 });
 
-app.get('/api/download-all', checkAdmin, (req, res) => {
-  const ids = fs.readdirSync(DATA_DIR).filter((f) => fs.statSync(path.join(DATA_DIR, f)).isDirectory());
+app.get('/api/download-all', checkAdmin, async (req, res) => {
+  const docs = await sessionsCol.find({}).toArray();
   const parts = [CODE_CSV_COLUMNS.join(',')];
-  for (const id of ids) {
-    const dir = path.join(DATA_DIR, id);
-    const csvFiles = fs.readdirSync(dir).filter((f) => f.endsWith('_code.csv'));
-    for (const cf of csvFiles) {
-      const lines = fs.readFileSync(path.join(dir, cf), 'utf8').split('\n');
-      parts.push(...lines.slice(1).filter(Boolean));
-    }
+  for (const doc of docs) {
+    parts.push(...buildCodeCsvRows(doc));
   }
   res.setHeader('Content-Disposition', 'attachment; filename="all_students_dataset.csv"');
   res.type('text/csv').send(parts.join('\n'));
@@ -350,7 +362,14 @@ fetch('/api/students').then(r => { if (r.ok) showApp(); }).catch(() => {});
 </script>
 </body></html>`;
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Collector server listening on :${PORT}`);
-  console.log(`Admin panel: http://localhost:${PORT}/admin  (login with the ADMIN_KEY password)`);
-});
+connectDb()
+  .then(() => {
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`Collector server listening on :${PORT}`);
+      console.log(`Admin panel: http://localhost:${PORT}/admin  (login with the ADMIN_KEY password)`);
+    });
+  })
+  .catch((err) => {
+    console.error('Failed to connect to MongoDB:', err.message);
+    process.exit(1);
+  });
