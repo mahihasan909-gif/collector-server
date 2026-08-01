@@ -1,0 +1,2 @@
+studentId,deptCode,sessionId,machineId,loginAt,logoutAt,file,language,eventCount,keystrokeCount,pasteBurstCount,autoFormatCount,addedCharsTotal,removedCharsTotal,idleEventCount,tabSwitchCount,code
+2023-1-60-053,60,sess1,m1,1000,2000,a.py,python,1,1,0,0,5,0,0,0,print(1)

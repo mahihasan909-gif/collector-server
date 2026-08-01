@@ -1,0 +1,1 @@
+{"studentId":"2023-1-60-053","deptCode":"60","sessionId":"sess1","machineId":"m1","loginAt":1000,"logoutAt":2000,"events":[{"studentId":"2023-1-60-053","sessionId":"sess1","machineId":"m1","timestamp":1500,"type":"keystroke","file":"a.py","language":"python","data":{"addedChars":5,"removedChars":0}}],"files":[{"path":"a.py","language":"python","content":"print(1)"}]}

@@ -1,0 +1,11 @@
+[
+  {
+    "sessionId": "sess1",
+    "deptCode": "60",
+    "machineId": "m1",
+    "loginAt": 1000,
+    "logoutAt": 2000,
+    "eventCount": 1,
+    "fileCount": 1
+  }
+]
