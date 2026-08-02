@@ -1,5 +1,6 @@
 const express = require('express');
 const crypto = require('crypto');
+const path = require('path');
 const { MongoClient } = require('mongodb');
 
 const PORT = process.env.PORT || 4000;
@@ -147,6 +148,7 @@ function summarizeStudentForAi(sessions) {
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
+app.use('/assets', express.static(path.join(__dirname, 'assets')));
 
 // --- extension upload: one full session package per login/logout cycle ---
 app.post('/session', async (req, res) => {
@@ -435,37 +437,51 @@ app.get('/student', (_req, res) => {
 });
 
 const STUDENT_HTML = `<!doctype html>
-<html><head><meta charset="utf-8"><title>My Result &mdash; Student Tracker</title>
+<html><head><meta charset="utf-8"><title>My Result &mdash; East West University</title>
 <style>
-body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;background:#0f1115;color:#e6e6e6;display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;box-sizing:border-box}
-.wrap{width:100%;max-width:640px}
-h1{font-size:20px;margin-bottom:16px}
-input{padding:10px;width:100%;box-sizing:border-box;background:#1c1f26;border:1px solid #2a2d34;color:#e6e6e6;border-radius:6px;margin-bottom:10px;font-size:14px}
-button{background:#2b3a55;color:#e6e6e6;border:1px solid #3a4a6b;border-radius:6px;padding:10px 14px;font-size:13px;cursor:pointer}
-button:hover{background:#35476b}
-#result{margin-top:20px;padding:14px;background:#1c1f26;border-radius:6px;white-space:pre-wrap;font-size:14px;line-height:1.5;display:none}
-#status{font-size:12px;color:#8a8f98;margin-bottom:10px;min-height:16px}
-#chatLog{background:#12141a;border-radius:6px;padding:10px;min-height:80px;max-height:300px;overflow-y:auto;font-size:13px;margin-bottom:8px}
+:root{--navy:#1b2a57;--navy-dark:#111c3e;--navy-light:#2e4080;--bg:#eef1f8;--card:#ffffff;--border:#dde3f0;--text:#1a1f36;--muted:#6b7280}
+*{box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,sans-serif;margin:0;min-height:100vh;background:var(--bg);color:var(--text)}
+header{background:linear-gradient(120deg,var(--navy-dark),var(--navy));padding:16px 28px;display:flex;align-items:center;gap:14px;box-shadow:0 2px 10px rgba(0,0,0,.15)}
+header img{height:46px;filter:drop-shadow(0 0 2px rgba(0,0,0,.3))}
+header .title{color:#fff}
+header .title h1{font-size:16px;margin:0;font-weight:600}
+header .title span{font-size:11px;color:#c6cff0;letter-spacing:.5px}
+main{display:flex;justify-content:center;padding:40px 16px}
+.wrap{width:100%;max-width:600px;background:var(--card);border:1px solid var(--border);border-radius:14px;padding:28px;box-shadow:0 6px 24px rgba(27,42,87,.08)}
+h2{font-size:18px;margin:0 0 18px;color:var(--navy)}
+input{padding:11px 12px;width:100%;box-sizing:border-box;background:#f7f9fd;border:1px solid var(--border);color:var(--text);border-radius:8px;margin-bottom:12px;font-size:14px}
+input:focus{outline:2px solid var(--navy-light);border-color:transparent}
+button{background:var(--navy);color:#fff;border:none;border-radius:8px;padding:11px 16px;font-size:13px;cursor:pointer;font-weight:600;transition:background .15s}
+button:hover{background:var(--navy-light)}
+#result{margin-top:18px;padding:16px;background:#f7f9fd;border:1px solid var(--border);border-radius:10px;white-space:pre-wrap;font-size:14px;line-height:1.6;display:none}
+#status{font-size:12px;color:var(--muted);margin-bottom:6px;min-height:16px}
+#chatLog{background:#f7f9fd;border:1px solid var(--border);border-radius:8px;padding:10px;min-height:80px;max-height:300px;overflow-y:auto;font-size:13px;margin-bottom:8px}
 .msg{margin-bottom:10px}
-.msg.me{color:#8fb8ff}
-.msg.ai{color:#e6e6e6}
+.msg.me{color:var(--navy)}
+.msg.ai{color:var(--text)}
 #chatRow{display:flex;gap:8px}
 #chatInput{flex:1;margin-bottom:0}
-#aiFab{position:fixed;right:24px;bottom:24px;width:56px;height:56px;border-radius:50%;background:linear-gradient(135deg,#6a5cff,#3aa0ff);border:none;color:#fff;font-size:22px;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:20}
-#aiFab:hover{filter:brightness(1.1)}
-#aiModalOverlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:21;align-items:center;justify-content:center}
-#aiModal{background:#1c1f26;border:1px solid #2a2d34;border-radius:10px;padding:18px;width:480px;max-width:90vw;max-height:80vh;overflow-y:auto;box-sizing:border-box}
-#aiModal h2{margin:0 0 6px;font-size:15px}
-#aiModalClose{float:right;cursor:pointer;color:#8a8f98;font-size:16px}
-#aiHint{font-size:12px;color:#8a8f98;margin-bottom:10px}
+#aiFab{position:fixed;right:26px;bottom:26px;width:58px;height:58px;border-radius:50%;background:linear-gradient(135deg,var(--navy),var(--navy-light));border:none;color:#fff;font-size:24px;cursor:pointer;box-shadow:0 6px 18px rgba(27,42,87,.4);z-index:20}
+#aiFab:hover{filter:brightness(1.15)}
+#aiModalOverlay{display:none;position:fixed;inset:0;background:rgba(17,28,62,.45);z-index:21;align-items:center;justify-content:center}
+#aiModal{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:20px;width:480px;max-width:90vw;max-height:80vh;overflow-y:auto;box-sizing:border-box;box-shadow:0 10px 40px rgba(0,0,0,.25)}
+#aiModal h2{margin:0 0 6px;font-size:16px}
+#aiModalClose{float:right;cursor:pointer;color:var(--muted);font-size:18px}
+#aiHint{font-size:12px;color:var(--muted);margin-bottom:12px}
 </style></head>
-<body><div class="wrap">
-<h1>Student Tracker &mdash; My Result</h1>
+<body>
+<header>
+  <img src="/assets/ewu-logo.png" alt="East West University" />
+  <div class="title"><h1>Student Tracker</h1><span>EAST WEST UNIVERSITY &mdash; MY RESULT</span></div>
+</header>
+<main><div class="wrap">
+<h2>View My Result</h2>
 <div id="status"></div>
 <input id="studentId" placeholder="Your student ID (e.g. 2023-1-60-053)" />
 <button id="loadBtn">View My Result</button>
 <div id="result"></div>
-</div>
+</div></main>
 
 <button id="aiFab" title="Ask the AI helper">&#10024;</button>
 <div id="aiModalOverlay">
@@ -547,57 +563,76 @@ function escapeHtml(s){ return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;'
 </body></html>`;
 
 const ADMIN_HTML = `<!doctype html>
-<html><head><meta charset="utf-8"><title>Student Tracker Admin</title>
+<html><head><meta charset="utf-8"><title>Admin &mdash; East West University</title>
 <style>
-body{font-family:system-ui,sans-serif;margin:0;display:flex;height:100vh;background:#0f1115;color:#e6e6e6}
-.col{overflow-y:auto;padding:12px;box-sizing:border-box}
-#students{width:220px;border-right:1px solid #2a2d34}
-#sessions{width:260px;border-right:1px solid #2a2d34}
-#detail{flex:1}
-h2{font-size:14px;text-transform:uppercase;color:#8a8f98;margin:0 0 8px}
-.item{padding:8px;border-radius:6px;cursor:pointer;margin-bottom:4px;font-size:13px}
-.item:hover{background:#1c1f26}
-.item.active{background:#2b3a55}
-pre{background:#1c1f26;padding:10px;border-radius:6px;overflow:auto;font-size:12px;max-height:300px}
+:root{--navy:#1b2a57;--navy-dark:#111c3e;--navy-light:#2e4080;--bg:#eef1f8;--card:#ffffff;--border:#dde3f0;--text:#1a1f36;--muted:#6b7280}
+*{box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,sans-serif;margin:0;height:100vh;display:flex;flex-direction:column;background:var(--bg);color:var(--text)}
+header{background:linear-gradient(120deg,var(--navy-dark),var(--navy));padding:12px 24px;display:flex;align-items:center;gap:14px;box-shadow:0 2px 10px rgba(0,0,0,.15);flex-shrink:0}
+header img{height:38px}
+header .title{color:#fff;flex:1}
+header .title h1{font-size:15px;margin:0;font-weight:600}
+header .title span{font-size:10px;color:#c6cff0;letter-spacing:.5px}
+header #logoutBtn{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.25)}
+header #logoutBtn:hover{background:rgba(255,255,255,.22)}
+#app{display:flex;flex:1;min-height:0}
+.col{overflow-y:auto;padding:14px;box-sizing:border-box;background:var(--card)}
+#students{width:230px;border-right:1px solid var(--border)}
+#sessions{width:270px;border-right:1px solid var(--border)}
+#detail{flex:1;background:var(--bg)}
+h2{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin:0 0 10px;font-weight:700}
+.item{padding:9px 10px;border-radius:8px;cursor:pointer;margin-bottom:4px;font-size:13px;border:1px solid transparent}
+.item:hover{background:#f1f4fb}
+.item.active{background:#e3e9fb;border-color:var(--navy-light)}
+pre{background:#f7f9fd;border:1px solid var(--border);padding:10px;border-radius:8px;overflow:auto;font-size:12px;max-height:300px}
 .file{margin-bottom:14px}
-.file h3{font-size:12px;color:#8a8f98;margin:0 0 4px}
-.badge{display:inline-block;background:#2b3a55;border-radius:10px;padding:1px 8px;font-size:11px;margin-left:6px}
-#deptFilter{width:100%;box-sizing:border-box;margin-bottom:8px;padding:6px;background:#1c1f26;border:1px solid #2a2d34;color:#e6e6e6;border-radius:6px}
-button{background:#2b3a55;color:#e6e6e6;border:1px solid #3a4a6b;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer;margin-bottom:8px}
-button:hover{background:#35476b}
+.file h3{font-size:12px;color:var(--muted);margin:0 0 4px}
+.badge{display:inline-block;background:var(--navy);color:#fff;border-radius:10px;padding:1px 8px;font-size:10px;margin-left:6px;font-weight:600}
+#deptFilter{width:100%;box-sizing:border-box;margin-bottom:8px;padding:8px;background:#f7f9fd;border:1px solid var(--border);color:var(--text);border-radius:8px}
+input,textarea,select{font-family:inherit}
+button{background:var(--navy);color:#fff;border:none;border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer;margin-bottom:8px;font-weight:600;transition:background .15s}
+button:hover{background:var(--navy-light)}
 .session-row{display:flex;align-items:center;justify-content:space-between}
-.session-row .dl{font-size:11px;color:#8fb8ff;text-decoration:none;margin-left:6px}
-#loginScreen{position:fixed;inset:0;background:#0f1115;display:flex;align-items:center;justify-content:center;flex-direction:column;z-index:10}
-#loginScreen h1{font-size:20px;margin-bottom:16px}
-#loginScreen input{padding:10px;width:260px;background:#1c1f26;border:1px solid #2a2d34;color:#e6e6e6;border-radius:6px;margin-bottom:10px;font-size:14px}
-#loginScreen button{width:260px;padding:10px}
-#loginError{color:#ff6b6b;font-size:12px;height:16px;margin-bottom:6px}
+.session-row .dl{font-size:11px;color:var(--navy-light);text-decoration:none;margin-left:6px;font-weight:600}
+#loginScreen{position:fixed;inset:0;background:linear-gradient(160deg,var(--navy-dark),var(--navy) 60%);display:flex;align-items:center;justify-content:center;flex-direction:column;z-index:10}
+#loginScreen img{height:70px;margin-bottom:18px}
+#loginScreen h1{font-size:18px;margin-bottom:18px;color:#fff;font-weight:600}
+#loginScreen input{padding:11px;width:270px;background:rgba(255,255,255,.95);border:1px solid transparent;color:var(--text);border-radius:8px;margin-bottom:12px;font-size:14px}
+#loginScreen button{width:270px;padding:11px;background:#fff;color:var(--navy)}
+#loginScreen button:hover{background:#e3e9fb}
+#loginError{color:#ffb4b4;font-size:12px;height:16px;margin-bottom:6px}
 #app{display:none}
-#aiFab{position:fixed;right:24px;bottom:24px;width:56px;height:56px;border-radius:50%;background:linear-gradient(135deg,#6a5cff,#3aa0ff);border:none;color:#fff;font-size:22px;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:20}
-#aiFab:hover{filter:brightness(1.1)}
-#aiModalOverlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:21;align-items:center;justify-content:center}
-#aiModal{background:#1c1f26;border:1px solid #2a2d34;border-radius:10px;padding:18px;width:520px;max-width:90vw;max-height:80vh;overflow-y:auto}
-#aiModal h2{margin:0 0 10px;font-size:15px}
-#aiModal select{width:100%;padding:8px;background:#12141a;border:1px solid #2a2d34;color:#e6e6e6;border-radius:6px;margin-bottom:10px}
-#aiModalClose{float:right;cursor:pointer;color:#8a8f98;font-size:16px}
+#aiFab{position:fixed;right:26px;bottom:26px;width:58px;height:58px;border-radius:50%;background:linear-gradient(135deg,var(--navy),var(--navy-light));border:none;color:#fff;font-size:24px;cursor:pointer;box-shadow:0 6px 18px rgba(27,42,87,.4);z-index:20}
+#aiFab:hover{filter:brightness(1.15)}
+#aiModalOverlay{display:none;position:fixed;inset:0;background:rgba(17,28,62,.45);z-index:21;align-items:center;justify-content:center}
+#aiModal{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:20px;width:520px;max-width:90vw;max-height:80vh;overflow-y:auto;box-shadow:0 10px 40px rgba(0,0,0,.25)}
+#aiModal h2{margin:0 0 10px;font-size:16px;text-transform:none;color:var(--text);font-weight:600}
+#aiModal select{width:100%;padding:9px;background:#f7f9fd;border:1px solid var(--border);color:var(--text);border-radius:8px;margin-bottom:10px}
+#aiModalClose{float:right;cursor:pointer;color:var(--muted);font-size:18px}
+#feedbackText{width:100%;box-sizing:border-box;background:#f7f9fd;color:var(--text);border:1px solid var(--border);border-radius:8px;padding:10px;font-size:13px;margin-top:8px}
 </style></head>
 <body>
 <div id="loginScreen">
+  <img src="/assets/ewu-logo.png" alt="East West University" />
   <h1>Student Tracker &mdash; Teacher Login</h1>
   <div id="loginError"></div>
   <input id="loginPassword" type="password" placeholder="Admin password" autofocus />
   <button id="loginBtn">Login</button>
 </div>
+<header>
+  <img src="/assets/ewu-logo.png" alt="East West University" />
+  <div class="title"><h1>Student Tracker &mdash; Admin</h1><span>EAST WEST UNIVERSITY</span></div>
+  <button id="logoutBtn">Logout</button>
+</header>
 <div id="app">
 <div class="col" id="students"><h2>Students</h2>
   <input id="deptFilter" placeholder="Dept code filter (blank = all)" value="__DEFAULT_DEPT__" />
   <button id="downloadAllBtn">Download All (CSV)</button>
   <button id="roomsBtn">Manage Rooms</button>
-  <button id="logoutBtn">Logout</button>
   <div id="studentList"></div>
 </div>
 <div class="col" id="sessions"><h2>Sessions</h2><div id="sessionList"></div></div>
-<div class="col" id="roomsPanel" style="display:none;width:340px;border-right:1px solid #2a2d34">
+<div class="col" id="roomsPanel" style="display:none;width:340px;border-right:1px solid var(--border)">
   <h2>Rooms (allowed student IDs)</h2>
   <input id="newRoomName" placeholder="Room name e.g. cse103" />
   <button id="createRoomBtn">Create Room</button>
@@ -617,13 +652,13 @@ button:hover{background:#35476b}
     <select id="aiStudentSelect"><option value="">Select a student...</option></select>
     <div id="aiModalBody" style="display:none">
       <button id="aiGenBtn">Generate AI Feedback</button>
-      <span id="aiGenStatus" style="font-size:11px;color:#8a8f98;margin-left:8px"></span>
-      <textarea id="feedbackText" rows="8" style="width:100%;box-sizing:border-box;background:#12141a;color:#e6e6e6;border:1px solid #2a2d34;border-radius:6px;padding:8px;font-size:13px;margin-top:8px"></textarea>
+      <span id="aiGenStatus" style="font-size:11px;color:var(--muted);margin-left:8px"></span>
+      <textarea id="feedbackText" rows="8"></textarea>
       <div style="margin-top:8px">
         <button id="saveDraftBtn">Save (Draft)</button>
         <button id="publishBtn">Publish to Student</button>
         <button id="unpublishBtn">Unpublish</button>
-        <span id="publishStatus" style="font-size:11px;color:#8a8f98;margin-left:8px"></span>
+        <span id="publishStatus" style="font-size:11px;color:var(--muted);margin-left:8px"></span>
       </div>
     </div>
   </div>
