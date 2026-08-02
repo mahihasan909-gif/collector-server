@@ -400,6 +400,47 @@ app.get('/student/result', async (req, res) => {
   res.json({ studentId, published: true, feedback: result.finalFeedback || '', updatedAt: result.updatedAt });
 });
 
+// Full student dashboard: room membership, session list, published feedback (used by /student page login).
+app.get('/student/me', async (req, res) => {
+  const studentId = (req.query.studentId || '').toString().trim();
+  if (!studentId) return res.status(400).json({ error: 'studentId required' });
+  const room = await roomsCol.findOne({ studentIds: studentId });
+  if (!room) return res.status(403).json({ error: 'This student ID is not on any active room roster. Ask your instructor to add you.' });
+
+  const sessions = await sessionsCol.find({ studentId }).sort({ loginAt: -1 }).toArray();
+  const result = await resultsCol.findOne({ studentId });
+
+  res.json({
+    studentId,
+    roomName: room.roomName,
+    sessions: sessions.map((s) => ({
+      sessionId: s.sessionId,
+      loginAt: s.loginAt,
+      logoutAt: s.logoutAt,
+      fileCount: (s.files || []).length,
+      eventCount: (s.events || []).length
+    })),
+    published: Boolean(result && result.published),
+    feedback: result && result.published ? result.finalFeedback || '' : null
+  });
+});
+
+// A single one of the student's own sessions, with their code files (read-only, no admin auth needed —
+// gated by room membership, same as /student/me).
+app.get('/student/sessions/:sessionId', async (req, res) => {
+  const studentId = (req.query.studentId || '').toString().trim();
+  if (!studentId) return res.status(400).json({ error: 'studentId required' });
+  if (!(await isStudentAllowed(studentId))) return res.status(403).json({ error: 'not allowed' });
+  const doc = await sessionsCol.findOne({ studentId, sessionId: req.params.sessionId });
+  if (!doc) return res.status(404).json({ error: 'not found' });
+  res.json({
+    sessionId: doc.sessionId,
+    loginAt: doc.loginAt,
+    logoutAt: doc.logoutAt,
+    files: (doc.files || []).map((f) => ({ path: f.path, language: f.language, content: f.content }))
+  });
+});
+
 app.post('/student/ai-hint', async (req, res) => {
   const { studentId, question } = req.body || {};
   const id = (studentId || '').toString().trim();
@@ -437,25 +478,37 @@ app.get('/student', (_req, res) => {
 });
 
 const STUDENT_HTML = `<!doctype html>
-<html><head><meta charset="utf-8"><title>My Result &mdash; East West University</title>
+<html><head><meta charset="utf-8"><title>Student Portal &mdash; East West University</title>
 <style>
 :root{--navy:#1b2a57;--navy-dark:#111c3e;--navy-light:#2e4080;--bg:#eef1f8;--card:#ffffff;--border:#dde3f0;--text:#1a1f36;--muted:#6b7280}
 *{box-sizing:border-box}
 body{font-family:'Segoe UI',system-ui,sans-serif;margin:0;min-height:100vh;background:var(--bg);color:var(--text)}
-header{background:linear-gradient(120deg,var(--navy-dark),var(--navy));padding:16px 28px;display:flex;align-items:center;gap:14px;box-shadow:0 2px 10px rgba(0,0,0,.15)}
-header img{height:46px;filter:drop-shadow(0 0 2px rgba(0,0,0,.3))}
-header .title{color:#fff}
-header .title h1{font-size:16px;margin:0;font-weight:600}
-header .title span{font-size:11px;color:#c6cff0;letter-spacing:.5px}
-main{display:flex;justify-content:center;padding:40px 16px}
-.wrap{width:100%;max-width:600px;background:var(--card);border:1px solid var(--border);border-radius:14px;padding:28px;box-shadow:0 6px 24px rgba(27,42,87,.08)}
+header{background:linear-gradient(120deg,var(--navy-dark),var(--navy));padding:14px 28px;display:flex;align-items:center;gap:14px;box-shadow:0 2px 10px rgba(0,0,0,.15)}
+header img{height:42px}
+header .title{color:#fff;flex:1}
+header .title h1{font-size:15px;margin:0;font-weight:600}
+header .title span{font-size:10px;color:#c6cff0;letter-spacing:.5px}
+header #logoutBtn{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.25);display:none}
+header #logoutBtn:hover{background:rgba(255,255,255,.22)}
+main{display:flex;justify-content:center;padding:36px 16px}
+.wrap{width:100%;max-width:420px;background:var(--card);border:1px solid var(--border);border-radius:14px;padding:28px;box-shadow:0 6px 24px rgba(27,42,87,.08)}
+.dash{width:100%;max-width:820px}
 h2{font-size:18px;margin:0 0 18px;color:var(--navy)}
+h3{font-size:13px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);margin:0 0 10px;font-weight:700}
 input{padding:11px 12px;width:100%;box-sizing:border-box;background:#f7f9fd;border:1px solid var(--border);color:var(--text);border-radius:8px;margin-bottom:12px;font-size:14px}
 input:focus{outline:2px solid var(--navy-light);border-color:transparent}
-button{background:var(--navy);color:#fff;border:none;border-radius:8px;padding:11px 16px;font-size:13px;cursor:pointer;font-weight:600;transition:background .15s}
+button{background:var(--navy);color:#fff;border:none;border-radius:8px;padding:10px 16px;font-size:13px;cursor:pointer;font-weight:600;transition:background .15s}
 button:hover{background:var(--navy-light)}
-#result{margin-top:18px;padding:16px;background:#f7f9fd;border:1px solid var(--border);border-radius:10px;white-space:pre-wrap;font-size:14px;line-height:1.6;display:none}
-#status{font-size:12px;color:var(--muted);margin-bottom:6px;min-height:16px}
+#loginStatus{font-size:12px;color:#c0392b;margin-bottom:6px;min-height:16px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:22px;margin-bottom:18px;box-shadow:0 4px 16px rgba(27,42,87,.06)}
+.badge{display:inline-block;background:var(--navy);color:#fff;border-radius:10px;padding:2px 10px;font-size:11px;margin-left:8px;font-weight:600}
+#feedbackBox{white-space:pre-wrap;line-height:1.6;font-size:14px;background:#f7f9fd;border:1px solid var(--border);border-radius:10px;padding:16px}
+.sessRow{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-radius:8px;cursor:pointer;border:1px solid var(--border);margin-bottom:8px;font-size:13px}
+.sessRow:hover{background:#f1f4fb}
+.sessRow.active{background:#e3e9fb;border-color:var(--navy-light)}
+.file{margin-bottom:16px}
+.file h4{font-size:12px;color:var(--muted);margin:0 0 6px}
+pre{background:#f7f9fd;border:1px solid var(--border);padding:12px;border-radius:8px;overflow:auto;font-size:12px;max-height:340px}
 #chatLog{background:#f7f9fd;border:1px solid var(--border);border-radius:8px;padding:10px;min-height:80px;max-height:300px;overflow-y:auto;font-size:13px;margin-bottom:8px}
 .msg{margin-bottom:10px}
 .msg.me{color:var(--navy)}
@@ -473,15 +526,35 @@ button:hover{background:var(--navy-light)}
 <body>
 <header>
   <img src="/assets/ewu-logo.png" alt="East West University" />
-  <div class="title"><h1>Student Tracker</h1><span>EAST WEST UNIVERSITY &mdash; MY RESULT</span></div>
+  <div class="title"><h1>Student Portal</h1><span id="headerSub">EAST WEST UNIVERSITY</span></div>
+  <button id="logoutBtn">Switch ID</button>
 </header>
-<main><div class="wrap">
-<h2>View My Result</h2>
-<div id="status"></div>
-<input id="studentId" placeholder="Your student ID (e.g. 2023-1-60-053)" />
-<button id="loadBtn">View My Result</button>
-<div id="result"></div>
-</div></main>
+
+<main>
+<div id="loginView" class="wrap">
+  <h2>Student Login</h2>
+  <div id="loginStatus"></div>
+  <input id="studentId" placeholder="Your student ID (e.g. 2023-1-60-053)" />
+  <button id="loadBtn">Login</button>
+</div>
+
+<div id="dashView" class="dash" style="display:none">
+  <div class="card">
+    <h3>Feedback &amp; Result</h3>
+    <div id="feedbackBox">Loading...</div>
+  </div>
+  <div class="card" style="display:flex;gap:24px;flex-wrap:wrap">
+    <div style="flex:1;min-width:240px">
+      <h3>Your Sessions</h3>
+      <div id="sessionList"></div>
+    </div>
+    <div style="flex:2;min-width:280px">
+      <h3>Code</h3>
+      <div id="codeView">Select a session to view your code.</div>
+    </div>
+  </div>
+</div>
+</main>
 
 <button id="aiFab" title="Ask the AI helper">&#10024;</button>
 <div id="aiModalOverlay">
@@ -510,28 +583,81 @@ document.getElementById('aiModalOverlay').addEventListener('click', (e) => {
   if (e.target.id === 'aiModalOverlay') document.getElementById('aiModalOverlay').style.display = 'none';
 });
 
-document.getElementById('loadBtn').onclick = loadResult;
-document.getElementById('studentId').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadResult(); });
+document.getElementById('loadBtn').onclick = login;
+document.getElementById('studentId').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
+document.getElementById('logoutBtn').onclick = () => {
+  sid = '';
+  document.getElementById('dashView').style.display = 'none';
+  document.getElementById('loginView').style.display = 'block';
+  document.getElementById('logoutBtn').style.display = 'none';
+  document.getElementById('headerSub').textContent = 'EAST WEST UNIVERSITY';
+  document.getElementById('studentId').value = '';
+  document.getElementById('loginStatus').textContent = '';
+};
 
-async function loadResult(){
-  sid = document.getElementById('studentId').value.trim();
-  const statusEl = document.getElementById('status');
-  const resultEl = document.getElementById('result');
-  resultEl.style.display = 'none';
-  if (!sid) { statusEl.textContent = 'Enter your student ID.'; return; }
-  statusEl.textContent = 'Loading...';
-  const r = await fetch('/student/result?studentId=' + encodeURIComponent(sid));
+async function login(){
+  const id = document.getElementById('studentId').value.trim();
+  const statusEl = document.getElementById('loginStatus');
+  if (!id) { statusEl.textContent = 'Enter your student ID.'; return; }
+  statusEl.textContent = 'Checking...';
+  const r = await fetch('/student/me?studentId=' + encodeURIComponent(id));
   const data = await r.json();
-  if (!r.ok) { statusEl.textContent = data.error || 'Error loading result.'; return; }
-  if (!data.published) {
-    statusEl.textContent = '';
-    resultEl.style.display = 'block';
-    resultEl.textContent = 'No result published yet. Check back later after your instructor reviews your work.';
-  } else {
-    statusEl.textContent = '';
-    resultEl.style.display = 'block';
-    resultEl.textContent = data.feedback;
+  if (!r.ok) {
+    statusEl.textContent = r.status === 403
+      ? 'You are not on the allowed list. Contact your instructor.'
+      : (data.error || 'Login failed.');
+    return;
   }
+  sid = id;
+  statusEl.textContent = '';
+  document.getElementById('loginView').style.display = 'none';
+  document.getElementById('dashView').style.display = 'block';
+  document.getElementById('logoutBtn').style.display = 'inline-block';
+  document.getElementById('headerSub').textContent = sid + ' \\u2014 Room: ' + data.roomName;
+  renderDashboard(data);
+}
+
+function renderDashboard(data){
+  const fb = document.getElementById('feedbackBox');
+  fb.textContent = data.published
+    ? data.feedback
+    : 'No feedback published yet. Check back later after your instructor reviews your work.';
+
+  const list = document.getElementById('sessionList');
+  list.innerHTML = '';
+  if (!data.sessions.length) {
+    list.innerHTML = '<div style="font-size:13px;color:var(--muted)">No sessions submitted yet.</div>';
+    return;
+  }
+  data.sessions.forEach((s) => {
+    const row = document.createElement('div');
+    row.className = 'sessRow';
+    const when = new Date(s.loginAt).toLocaleString();
+    row.innerHTML = '<span>' + when + '</span><span class="badge">' + s.fileCount + ' files</span>';
+    row.onclick = () => {
+      document.querySelectorAll('.sessRow').forEach((x) => x.classList.remove('active'));
+      row.classList.add('active');
+      loadCode(s.sessionId);
+    };
+    list.appendChild(row);
+  });
+}
+
+async function loadCode(sessionId){
+  const view = document.getElementById('codeView');
+  view.textContent = 'Loading...';
+  const r = await fetch('/student/sessions/' + encodeURIComponent(sessionId) + '?studentId=' + encodeURIComponent(sid));
+  const data = await r.json();
+  if (!r.ok) { view.textContent = data.error || 'Error loading session.'; return; }
+  if (!data.files.length) { view.textContent = 'No files recorded in this session.'; return; }
+  view.innerHTML = '';
+  data.files.forEach((f) => {
+    const div = document.createElement('div');
+    div.className = 'file';
+    div.innerHTML = '<h4>' + escapeHtml(f.path) + ' (' + escapeHtml(f.language) + ')</h4><pre></pre>';
+    div.querySelector('pre').textContent = f.content;
+    view.appendChild(div);
+  });
 }
 
 document.getElementById('chatBtn').onclick = sendChat;
@@ -541,7 +667,7 @@ async function sendChat(){
   const input = document.getElementById('chatInput');
   const q = input.value.trim();
   if (!q) return;
-  if (!sid) { alert('Enter your student ID in the box above first, then open this AI helper again.'); return; }
+  if (!sid) { alert('Log in with your student ID first, then open this AI helper again.'); return; }
   const log = document.getElementById('chatLog');
   log.innerHTML += '<div class="msg me"><b>You:</b> ' + escapeHtml(q) + '</div>';
   input.value = '';
