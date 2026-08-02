@@ -7,6 +7,7 @@ const API_KEY = process.env.API_KEY || '';
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
 const ALLOWED_DEPT = process.env.ALLOWED_DEPT_CODE || '60'; // e.g. 60 = CSE; empty = allow all
 const MONGODB_URI = process.env.MONGODB_URI || '';
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 
 if (!API_KEY || !ADMIN_KEY) {
   console.error(
@@ -26,14 +27,26 @@ if (!MONGODB_URI) {
 }
 
 let sessionsCol;
+let resultsCol;
+let roomsCol;
 
 async function connectDb() {
   const client = new MongoClient(MONGODB_URI);
   await client.connect();
   const db = client.db('student_tracker');
   sessionsCol = db.collection('sessions');
+  resultsCol = db.collection('results');
+  roomsCol = db.collection('rooms');
   await sessionsCol.createIndex({ studentId: 1, sessionId: 1 }, { unique: true });
+  await resultsCol.createIndex({ studentId: 1 }, { unique: true });
+  await roomsCol.createIndex({ roomName: 1 }, { unique: true });
+  await roomsCol.createIndex({ studentIds: 1 });
   console.log('Connected to MongoDB.');
+}
+
+async function isStudentAllowed(studentId) {
+  const room = await roomsCol.findOne({ studentIds: studentId });
+  return Boolean(room);
 }
 
 function safeName(name) {
@@ -87,6 +100,51 @@ function buildCodeCsv(pkg) {
   return [CODE_CSV_COLUMNS.join(','), ...buildCodeCsvRows(pkg)].join('\n');
 }
 
+// --- Gemini (free tier) helper ---
+async function callGemini(prompt) {
+  if (!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY not configured on server');
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+  });
+  if (!r.ok) {
+    const t = await r.text();
+    throw new Error(`Gemini API error ${r.status}: ${t.slice(0, 300)}`);
+  }
+  const data = await r.json();
+  return data?.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
+}
+
+function summarizeStudentForAi(sessions) {
+  let totalKeystrokes = 0, totalPaste = 0, totalAutoFormat = 0, totalIdle = 0, totalTabSwitch = 0;
+  const fileSummaries = [];
+  for (const s of sessions) {
+    const events = s.events || [];
+    for (const f of (s.files || [])) {
+      const fileEvents = events.filter((e) => e.file === f.path);
+      let keystrokes = 0, paste = 0, autoFormat = 0, idle = 0, tabSwitch = 0;
+      for (const e of fileEvents) {
+        if (e.type === 'keystroke') keystrokes++;
+        if (e.type === 'paste_burst') paste++;
+        if (e.type === 'auto_format') autoFormat++;
+        if (e.type === 'idle_start') idle++;
+        if (e.type === 'tab_switch') tabSwitch++;
+      }
+      totalKeystrokes += keystrokes; totalPaste += paste; totalAutoFormat += autoFormat;
+      totalIdle += idle; totalTabSwitch += tabSwitch;
+      fileSummaries.push(
+        `File: ${f.path} (${f.language})\nKeystrokes: ${keystrokes}, PasteBursts: ${paste}, AutoFormats: ${autoFormat}, IdleEvents: ${idle}, TabSwitches: ${tabSwitch}\nCode (truncated):\n${(f.content || '').slice(0, 4000)}\n---`
+      );
+    }
+  }
+  return {
+    totals: { totalKeystrokes, totalPaste, totalAutoFormat, totalIdle, totalTabSwitch, sessionCount: sessions.length },
+    fileSummaries
+  };
+}
+
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
@@ -101,6 +159,9 @@ app.post('/session', async (req, res) => {
   }
   if (ALLOWED_DEPT && pkg.deptCode !== ALLOWED_DEPT) {
     return res.status(403).json({ error: `dept code ${pkg.deptCode} not accepted here (expected ${ALLOWED_DEPT})` });
+  }
+  if (!(await isStudentAllowed(pkg.studentId))) {
+    return res.status(403).json({ error: 'this student ID is not on any active room roster' });
   }
 
   await sessionsCol.updateOne(
@@ -216,9 +277,253 @@ app.get('/api/download-all', checkAdmin, async (req, res) => {
   res.type('text/csv').send(parts.join('\n'));
 });
 
+// --- rooms: whitelist of student IDs allowed to use extension + student panel ---
+
+app.get('/admin/rooms', checkAdmin, async (req, res) => {
+  const rooms = await roomsCol.find({}).toArray();
+  res.json(rooms.map((r) => ({ roomName: r.roomName, studentIds: r.studentIds || [], createdAt: r.createdAt })));
+});
+
+app.post('/admin/rooms', checkAdmin, async (req, res) => {
+  const roomName = (req.body?.roomName || '').toString().trim();
+  if (!roomName) return res.status(400).json({ error: 'roomName required' });
+  const ids = parseIdList(req.body?.studentIds);
+  try {
+    await roomsCol.insertOne({ roomName, studentIds: ids, createdAt: Date.now() });
+  } catch (err) {
+    if (err.code === 11000) return res.status(409).json({ error: 'room already exists' });
+    throw err;
+  }
+  res.json({ ok: true });
+});
+
+app.post('/admin/rooms/:roomName/students', checkAdmin, async (req, res) => {
+  const roomName = req.params.roomName;
+  const ids = parseIdList(req.body?.studentIds);
+  if (!ids.length) return res.status(400).json({ error: 'studentIds required' });
+  const result = await roomsCol.updateOne({ roomName }, { $addToSet: { studentIds: { $each: ids } } });
+  if (!result.matchedCount) return res.status(404).json({ error: 'room not found' });
+  res.json({ ok: true });
+});
+
+app.delete('/admin/rooms/:roomName/students/:studentId', checkAdmin, async (req, res) => {
+  await roomsCol.updateOne({ roomName: req.params.roomName }, { $pull: { studentIds: req.params.studentId } });
+  res.json({ ok: true });
+});
+
+app.delete('/admin/rooms/:roomName', checkAdmin, async (req, res) => {
+  await roomsCol.deleteOne({ roomName: req.params.roomName });
+  res.json({ ok: true });
+});
+
+// Danger zone: wipe all collected session/result data for every student ID in this room.
+// The room roster itself (allowed IDs) is left intact.
+app.delete('/admin/rooms/:roomName/data', checkAdmin, async (req, res) => {
+  const room = await roomsCol.findOne({ roomName: req.params.roomName });
+  if (!room) return res.status(404).json({ error: 'room not found' });
+  const ids = room.studentIds || [];
+  const sessRes = await sessionsCol.deleteMany({ studentId: { $in: ids } });
+  const resRes = await resultsCol.deleteMany({ studentId: { $in: ids } });
+  res.json({ ok: true, deletedSessions: sessRes.deletedCount, deletedResults: resRes.deletedCount });
+});
+
+function parseIdList(input) {
+  if (Array.isArray(input)) return input.map((s) => String(s).trim()).filter(Boolean);
+  if (typeof input === 'string') return input.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
+  return [];
+}
+
+// --- AI-generated + manual feedback/result per student ---
+
+app.post('/admin/ai-generate/:studentId', checkAdmin, async (req, res) => {
+  const studentId = req.params.studentId;
+  const sessions = await sessionsCol.find({ studentId }).sort({ loginAt: -1 }).toArray();
+  if (!sessions.length) return res.status(404).json({ error: 'no sessions for this student' });
+
+  const { totals, fileSummaries } = summarizeStudentForAi(sessions);
+  const prompt =
+    `You are a programming instructor's assistant helping evaluate a CSE student's coding activity ` +
+    `for signs of good/bad practice and possible AI-assistance overuse, based on keystroke telemetry ` +
+    `and their code.\n\nActivity totals across ${totals.sessionCount} sessions: ${JSON.stringify(totals)}\n\n` +
+    `Per-file details:\n${fileSummaries.join('\n')}\n\n` +
+    `Write a short, constructive feedback report (150-250 words) for the STUDENT to read, covering: ` +
+    `(1) what they're doing well, (2) specific areas to improve (coding habits, patterns, testing, etc.), ` +
+    `(3) if paste-burst/auto-format counts look unusually high relative to keystrokes, gently note it as ` +
+    `something to be mindful of without accusing them of cheating. Be encouraging and specific, not generic. ` +
+    `Do not include a numeric score.`;
+
+  let aiFeedback;
+  try {
+    aiFeedback = await callGemini(prompt);
+  } catch (err) {
+    return res.status(502).json({ error: String(err.message || err) });
+  }
+
+  await resultsCol.updateOne(
+    { studentId },
+    { $set: { studentId, aiFeedback, aiGeneratedAt: Date.now() } },
+    { upsert: true }
+  );
+  res.json({ ok: true, aiFeedback });
+});
+
+app.get('/admin/result/:studentId', checkAdmin, async (req, res) => {
+  const doc = await resultsCol.findOne({ studentId: req.params.studentId });
+  res.json(doc || { studentId: req.params.studentId });
+});
+
+app.post('/admin/result/:studentId', checkAdmin, async (req, res) => {
+  const studentId = req.params.studentId;
+  const { feedback, published } = req.body || {};
+  const update = { studentId, finalFeedback: feedback ?? '', updatedAt: Date.now() };
+  if (published !== undefined) update.published = Boolean(published);
+  if (published === true) update.publishedAt = Date.now();
+  await resultsCol.updateOne({ studentId }, { $set: update }, { upsert: true });
+  const doc = await resultsCol.findOne({ studentId });
+  res.json(doc);
+});
+
+// --- student-facing endpoints (ID only, no password) ---
+
+app.get('/student/result', async (req, res) => {
+  const studentId = (req.query.studentId || '').toString().trim();
+  if (!studentId) return res.status(400).json({ error: 'studentId required' });
+  if (!(await isStudentAllowed(studentId))) return res.status(403).json({ error: 'this student ID is not on any active room roster' });
+  const exists = await sessionsCol.findOne({ studentId }, { projection: { _id: 1 } });
+  if (!exists) return res.status(404).json({ error: 'no such student id on record' });
+  const result = await resultsCol.findOne({ studentId });
+  if (!result || !result.published) {
+    return res.json({ studentId, published: false, feedback: null });
+  }
+  res.json({ studentId, published: true, feedback: result.finalFeedback || '', updatedAt: result.updatedAt });
+});
+
+app.post('/student/ai-hint', async (req, res) => {
+  const { studentId, question } = req.body || {};
+  const id = (studentId || '').toString().trim();
+  const q = (question || '').toString().trim();
+  if (!id || !q) return res.status(400).json({ error: 'studentId and question required' });
+  if (!(await isStudentAllowed(id))) return res.status(403).json({ error: 'this student ID is not on any active room roster' });
+  const exists = await sessionsCol.findOne({ studentId: id }, { projection: { _id: 1 } });
+  if (!exists) return res.status(404).json({ error: 'no such student id on record' });
+
+  const sessions = await sessionsCol.find({ studentId: id }).sort({ loginAt: -1 }).limit(3).toArray();
+  const { fileSummaries } = summarizeStudentForAi(sessions);
+  const prompt =
+    `You are a friendly programming tutor helping a CSE student. You must NEVER write or output actual ` +
+    `code, code snippets, or fixed versions of their code — only give conceptual hints, advice, questions ` +
+    `to think about, and pointers to concepts/documentation. If the student asks for code directly, politely ` +
+    `decline and redirect them to figure it out with hints instead.\n\n` +
+    `Some of the student's recent code (for context only, do not repeat it back or fix it):\n` +
+    `${fileSummaries.slice(0, 3).join('\n').slice(0, 6000)}\n\n` +
+    `Student's question: ${q}\n\nGive a short, encouraging, hint-only answer (max 150 words).`;
+
+  try {
+    const answer = await callGemini(prompt);
+    res.json({ answer });
+  } catch (err) {
+    res.status(502).json({ error: String(err.message || err) });
+  }
+});
+
 app.get('/admin', (_req, res) => {
   res.type('html').send(ADMIN_HTML.replace('__DEFAULT_DEPT__', ALLOWED_DEPT));
 });
+
+app.get('/student', (_req, res) => {
+  res.type('html').send(STUDENT_HTML);
+});
+
+const STUDENT_HTML = `<!doctype html>
+<html><head><meta charset="utf-8"><title>My Result &mdash; Student Tracker</title>
+<style>
+body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;background:#0f1115;color:#e6e6e6;display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;box-sizing:border-box}
+.wrap{width:100%;max-width:640px}
+h1{font-size:20px;margin-bottom:16px}
+input{padding:10px;width:100%;box-sizing:border-box;background:#1c1f26;border:1px solid #2a2d34;color:#e6e6e6;border-radius:6px;margin-bottom:10px;font-size:14px}
+button{background:#2b3a55;color:#e6e6e6;border:1px solid #3a4a6b;border-radius:6px;padding:10px 14px;font-size:13px;cursor:pointer}
+button:hover{background:#35476b}
+#result{margin-top:20px;padding:14px;background:#1c1f26;border-radius:6px;white-space:pre-wrap;font-size:14px;line-height:1.5;display:none}
+#status{font-size:12px;color:#8a8f98;margin-bottom:10px;min-height:16px}
+#chat{margin-top:28px;display:none}
+#chatLog{background:#1c1f26;border-radius:6px;padding:10px;min-height:80px;max-height:300px;overflow-y:auto;font-size:13px;margin-bottom:8px}
+.msg{margin-bottom:10px}
+.msg.me{color:#8fb8ff}
+.msg.ai{color:#e6e6e6}
+#chatRow{display:flex;gap:8px}
+#chatInput{flex:1;margin-bottom:0}
+</style></head>
+<body><div class="wrap">
+<h1>Student Tracker &mdash; My Result</h1>
+<div id="status"></div>
+<input id="studentId" placeholder="Your student ID (e.g. 2023-1-60-053)" />
+<button id="loadBtn">View My Result</button>
+<div id="result"></div>
+
+<div id="chat">
+  <h1>Need advice? Ask the AI helper</h1>
+  <div id="status2" style="font-size:12px;color:#8a8f98;margin-bottom:8px">Hints only &mdash; it will not write code for you.</div>
+  <div id="chatLog"></div>
+  <div id="chatRow">
+    <input id="chatInput" placeholder="e.g. Why is my loop running forever?" />
+    <button id="chatBtn">Ask</button>
+  </div>
+</div>
+</div>
+<script>
+let sid = '';
+
+document.getElementById('loadBtn').onclick = loadResult;
+document.getElementById('studentId').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadResult(); });
+
+async function loadResult(){
+  sid = document.getElementById('studentId').value.trim();
+  const statusEl = document.getElementById('status');
+  const resultEl = document.getElementById('result');
+  resultEl.style.display = 'none';
+  if (!sid) { statusEl.textContent = 'Enter your student ID.'; return; }
+  statusEl.textContent = 'Loading...';
+  const r = await fetch('/student/result?studentId=' + encodeURIComponent(sid));
+  const data = await r.json();
+  if (!r.ok) { statusEl.textContent = data.error || 'Error loading result.'; return; }
+  if (!data.published) {
+    statusEl.textContent = '';
+    resultEl.style.display = 'block';
+    resultEl.textContent = 'No result published yet. Check back later after your instructor reviews your work.';
+  } else {
+    statusEl.textContent = '';
+    resultEl.style.display = 'block';
+    resultEl.textContent = data.feedback;
+  }
+  document.getElementById('chat').style.display = 'block';
+}
+
+document.getElementById('chatBtn').onclick = sendChat;
+document.getElementById('chatInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChat(); });
+
+async function sendChat(){
+  const input = document.getElementById('chatInput');
+  const q = input.value.trim();
+  if (!q || !sid) return;
+  const log = document.getElementById('chatLog');
+  log.innerHTML += '<div class="msg me"><b>You:</b> ' + escapeHtml(q) + '</div>';
+  input.value = '';
+  log.innerHTML += '<div class="msg ai" id="pending">Thinking...</div>';
+  log.scrollTop = log.scrollHeight;
+  const r = await fetch('/student/ai-hint', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ studentId: sid, question: q })
+  });
+  const data = await r.json();
+  document.getElementById('pending').remove();
+  log.innerHTML += '<div class="msg ai"><b>Hint:</b> ' + escapeHtml(r.ok ? data.answer : (data.error || 'Something went wrong.')) + '</div>';
+  log.scrollTop = log.scrollHeight;
+}
+
+function escapeHtml(s){ return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+</script>
+</body></html>`;
 
 const ADMIN_HTML = `<!doctype html>
 <html><head><meta charset="utf-8"><title>Student Tracker Admin</title>
@@ -259,13 +564,75 @@ button:hover{background:#35476b}
 <div class="col" id="students"><h2>Students</h2>
   <input id="deptFilter" placeholder="Dept code filter (blank = all)" value="__DEFAULT_DEPT__" />
   <button id="downloadAllBtn">Download All (CSV)</button>
+  <button id="roomsBtn">Manage Rooms</button>
   <button id="logoutBtn">Logout</button>
   <div id="studentList"></div>
 </div>
 <div class="col" id="sessions"><h2>Sessions</h2><div id="sessionList"></div></div>
-<div class="col" id="detail"><h2>Detail</h2><div id="detailBody">Select a student → session.</div></div>
+<div class="col" id="roomsPanel" style="display:none;width:340px;border-right:1px solid #2a2d34">
+  <h2>Rooms (allowed student IDs)</h2>
+  <input id="newRoomName" placeholder="Room name e.g. cse103" />
+  <button id="createRoomBtn">Create Room</button>
+  <div id="roomList" style="margin-top:12px"></div>
+</div>
+<div class="col" id="detail">
+  <h2>Feedback &amp; Result</h2>
+  <div id="feedbackBox" style="display:none;margin-bottom:16px;padding:10px;background:#1c1f26;border-radius:6px">
+    <div id="feedbackStudentLabel" style="font-size:12px;color:#8a8f98;margin-bottom:6px"></div>
+    <button id="aiGenBtn">Generate AI Feedback</button>
+    <span id="aiGenStatus" style="font-size:11px;color:#8a8f98;margin-left:8px"></span>
+    <textarea id="feedbackText" rows="8" style="width:100%;box-sizing:border-box;background:#12141a;color:#e6e6e6;border:1px solid #2a2d34;border-radius:6px;padding:8px;font-size:13px;margin-top:8px"></textarea>
+    <div style="margin-top:8px">
+      <button id="saveDraftBtn">Save (Draft)</button>
+      <button id="publishBtn">Publish to Student</button>
+      <button id="unpublishBtn">Unpublish</button>
+      <span id="publishStatus" style="font-size:11px;color:#8a8f98;margin-left:8px"></span>
+    </div>
+  </div>
+  <h2>Session Detail</h2>
+  <div id="detailBody">Select a student &rarr; session.</div>
+</div>
 </div>
 <script>
+let currentFeedbackStudentId = '';
+
+async function loadFeedback(studentId){
+  currentFeedbackStudentId = studentId;
+  document.getElementById('feedbackBox').style.display = 'block';
+  document.getElementById('feedbackStudentLabel').textContent = studentId;
+  document.getElementById('aiGenStatus').textContent = '';
+  document.getElementById('publishStatus').textContent = '';
+  const doc = await j('/admin/result/' + encodeURIComponent(studentId));
+  document.getElementById('feedbackText').value = doc.finalFeedback || doc.aiFeedback || '';
+  document.getElementById('publishStatus').textContent = doc.published ? 'Published' : 'Not published';
+}
+
+document.getElementById('aiGenBtn').onclick = async () => {
+  if (!currentFeedbackStudentId) return;
+  document.getElementById('aiGenStatus').textContent = 'Generating...';
+  const r = await fetch('/admin/ai-generate/' + encodeURIComponent(currentFeedbackStudentId), { method: 'POST' });
+  const data = await r.json();
+  if (!r.ok) { document.getElementById('aiGenStatus').textContent = 'Error: ' + (data.error || 'failed'); return; }
+  document.getElementById('feedbackText').value = data.aiFeedback;
+  document.getElementById('aiGenStatus').textContent = 'AI draft generated (not published yet).';
+};
+
+async function saveResult(published){
+  if (!currentFeedbackStudentId) return;
+  const feedback = document.getElementById('feedbackText').value;
+  const r = await fetch('/admin/result/' + encodeURIComponent(currentFeedbackStudentId), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ feedback, published })
+  });
+  const doc = await r.json();
+  document.getElementById('publishStatus').textContent = doc.published ? 'Published' : 'Saved as draft (not published)';
+}
+
+document.getElementById('saveDraftBtn').onclick = () => saveResult(false);
+document.getElementById('publishBtn').onclick = () => saveResult(true);
+document.getElementById('unpublishBtn').onclick = () => saveResult(false);
+
 async function j(url){
   const r = await fetch(url);
   if (r.status === 401) { showLogin(); throw new Error('unauthorized'); }
@@ -313,7 +680,7 @@ async function loadStudents(){
     d.textContent = s.studentId;
     d.innerHTML += '<span class="badge">dept ' + (s.deptCode || '?') + '</span>';
     d.innerHTML += '<span class="badge">' + s.sessionCount + '</span>';
-    d.onclick = () => { document.querySelectorAll('#studentList .item').forEach(x=>x.classList.remove('active')); d.classList.add('active'); loadSessions(s.studentId); };
+    d.onclick = () => { document.querySelectorAll('#studentList .item').forEach(x=>x.classList.remove('active')); d.classList.add('active'); loadSessions(s.studentId); loadFeedback(s.studentId); };
     el.appendChild(d);
   });
 }
@@ -321,6 +688,68 @@ document.getElementById('deptFilter').addEventListener('input', loadStudents);
 document.getElementById('downloadAllBtn').onclick = () => {
   window.location.href = '/api/download-all';
 };
+
+document.getElementById('roomsBtn').onclick = () => {
+  const el = document.getElementById('roomsPanel');
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+  if (el.style.display === 'block') loadRooms();
+};
+
+document.getElementById('createRoomBtn').onclick = async () => {
+  const roomName = document.getElementById('newRoomName').value.trim();
+  if (!roomName) return;
+  const r = await fetch('/admin/rooms', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ roomName, studentIds: [] })
+  });
+  if (r.ok) { document.getElementById('newRoomName').value = ''; loadRooms(); }
+  else { const d = await r.json(); alert(d.error || 'failed'); }
+};
+
+async function loadRooms(){
+  const rooms = await j('/admin/rooms');
+  const el = document.getElementById('roomList');
+  el.innerHTML = '';
+  rooms.forEach(room => {
+    const box = document.createElement('div');
+    box.style.cssText = 'background:#1c1f26;border-radius:6px;padding:10px;margin-bottom:10px';
+    box.innerHTML =
+      '<div style="font-weight:bold;margin-bottom:4px">' + room.roomName +
+      '<span class="badge">' + room.studentIds.length + ' ids</span></div>' +
+      '<textarea rows="3" placeholder="paste student IDs, one per line or comma separated" style="width:100%;box-sizing:border-box;background:#12141a;color:#e6e6e6;border:1px solid #2a2d34;border-radius:6px;padding:6px;font-size:12px"></textarea>' +
+      '<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">' +
+      '<button class="addIdsBtn">Add IDs</button>' +
+      '<button class="delDataBtn" style="background:#5a2b2b">Delete Room Data</button>' +
+      '<button class="delRoomBtn" style="background:#5a2b2b">Delete Room</button>' +
+      '</div>' +
+      '<div style="margin-top:6px;font-size:11px;color:#8a8f98">' + room.studentIds.join(', ') + '</div>';
+    box.querySelector('.addIdsBtn').onclick = async () => {
+      const ta = box.querySelector('textarea');
+      const studentIds = ta.value;
+      if (!studentIds.trim()) return;
+      await fetch('/admin/rooms/' + encodeURIComponent(room.roomName) + '/students', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ studentIds })
+      });
+      loadRooms();
+    };
+    box.querySelector('.delDataBtn').onclick = async () => {
+      if (!confirm('Delete ALL collected session/result data for every student in room "' + room.roomName + '"? This cannot be undone. The roster (allowed IDs) stays.')) return;
+      const r = await fetch('/admin/rooms/' + encodeURIComponent(room.roomName) + '/data', { method: 'DELETE' });
+      const d = await r.json();
+      alert('Deleted ' + d.deletedSessions + ' sessions, ' + d.deletedResults + ' results.');
+      loadStudents();
+    };
+    box.querySelector('.delRoomBtn').onclick = async () => {
+      if (!confirm('Delete room "' + room.roomName + '"? Students in it will lose access to the extension and student panel. Their already-collected data is NOT deleted.')) return;
+      await fetch('/admin/rooms/' + encodeURIComponent(room.roomName), { method: 'DELETE' });
+      loadRooms();
+    };
+    el.appendChild(box);
+  });
+}
 
 async function loadSessions(studentId){
   const sessions = await j('/api/students/' + encodeURIComponent(studentId) + '/sessions');
