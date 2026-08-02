@@ -602,11 +602,23 @@ app.get('/student', (_req, res) => {
 const STUDENT_HTML = `<!doctype html>
 <html><head><meta charset="utf-8"><title>Student Portal &mdash; East West University</title>
 <style>
-:root{--navy:#1b2a57;--navy-dark:#111c3e;--navy-light:#2e4080;--bg:#eef1f8;--card:#ffffff;--border:#dde3f0;--text:#1a1f36;--muted:#6b7280}
+:root{--navy:#101c3c;--navy-dark:#0a1330;--navy-light:#2f6fed;--bg:#eef2fb;--card:#ffffff;--border:#dde3f0;--text:#101c3c;--muted:#6b7280}
 *{box-sizing:border-box}
-body{font-family:'Segoe UI',system-ui,sans-serif;margin:0;min-height:100vh;background:var(--bg);color:var(--text)}
+body{font-family:'Segoe UI',system-ui,sans-serif;margin:0;min-height:100vh;color:var(--text);position:relative;
+  background:
+    radial-gradient(600px circle at 6% 8%, rgba(47,111,237,.14), transparent 60%),
+    radial-gradient(560px circle at 96% 92%, rgba(47,111,237,.16), transparent 60%),
+    var(--bg);
+}
+body::before{content:'';position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.5;
+  background-image: radial-gradient(rgba(47,111,237,.18) 1px, transparent 1px);
+  background-size:24px 24px;
+  -webkit-mask-image: radial-gradient(circle at 6% 8%, black, transparent 45%), radial-gradient(circle at 96% 92%, black, transparent 45%);
+  mask-image: radial-gradient(circle at 6% 8%, black, transparent 45%), radial-gradient(circle at 96% 92%, black, transparent 45%);
+}
 header{background:linear-gradient(120deg,var(--navy-dark),var(--navy));padding:14px 28px;display:flex;align-items:center;gap:14px;box-shadow:0 2px 10px rgba(0,0,0,.15)}
-header img{height:42px}
+.logoBadge{width:46px;height:46px;border-radius:50%;background:#fff;overflow:hidden;flex-shrink:0;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.25)}
+.logoBadge img{width:150%;height:150%;object-fit:cover;object-position:50% 32%}
 header .title{color:#fff;flex:1}
 header .title h1{font-size:15px;margin:0;font-weight:600}
 header .title span{font-size:10px;color:#c6cff0;letter-spacing:.5px}
@@ -647,8 +659,8 @@ pre{background:#f7f9fd;border:1px solid var(--border);padding:12px;border-radius
 </style></head>
 <body>
 <header>
-  <img src="/assets/ewu-logo.png" alt="East West University" />
-  <div class="title"><h1>Student Portal</h1><span id="headerSub">EAST WEST UNIVERSITY</span></div>
+  <span class="logoBadge"><img src="/assets/logo.jpg" alt="AI Code Detection" /></span>
+  <div class="title"><h1>Student Portal</h1><span id="headerSub">AI CODE DETECTION TOOL</span></div>
   <button id="logoutBtn">Switch ID</button>
 </header>
 
@@ -817,11 +829,12 @@ function escapeHtml(s){ return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;'
 const ADMIN_HTML = `<!doctype html>
 <html><head><meta charset="utf-8"><title>Admin &mdash; East West University</title>
 <style>
-:root{--navy:#1b2a57;--navy-dark:#111c3e;--navy-light:#2e4080;--bg:#eef1f8;--card:#ffffff;--border:#dde3f0;--text:#1a1f36;--muted:#6b7280}
+:root{--navy:#101c3c;--navy-dark:#0a1330;--navy-light:#2f6fed;--bg:#eef2fb;--card:#ffffff;--border:#dde3f0;--text:#101c3c;--muted:#6b7280}
 *{box-sizing:border-box}
 body{font-family:'Segoe UI',system-ui,sans-serif;margin:0;height:100vh;display:flex;flex-direction:column;background:var(--bg);color:var(--text)}
 header{background:linear-gradient(120deg,var(--navy-dark),var(--navy));padding:12px 24px;display:flex;align-items:center;gap:14px;box-shadow:0 2px 10px rgba(0,0,0,.15);flex-shrink:0}
-header img{height:38px}
+.logoBadge{width:40px;height:40px;border-radius:50%;background:#fff;overflow:hidden;flex-shrink:0;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.25)}
+.logoBadge img{width:150%;height:150%;object-fit:cover;object-position:50% 32%}
 header .title{color:#fff;flex:1}
 header .title h1{font-size:15px;margin:0;font-weight:600}
 header .title span{font-size:10px;color:#c6cff0;letter-spacing:.5px}
@@ -846,9 +859,24 @@ button{background:var(--navy);color:#fff;border:none;border-radius:8px;padding:8
 button:hover{background:var(--navy-light)}
 .session-row{display:flex;align-items:center;justify-content:space-between}
 .session-row .dl{font-size:11px;color:var(--navy-light);text-decoration:none;margin-left:6px;font-weight:600}
-#loginScreen{position:fixed;inset:0;background:linear-gradient(160deg,var(--navy-dark),var(--navy) 60%);display:flex;align-items:center;justify-content:center;flex-direction:column;z-index:10}
-#loginScreen img{height:64px;margin-bottom:16px}
-#loginCard{background:#fff;border-radius:16px;padding:36px 32px;width:340px;box-sizing:border-box;box-shadow:0 20px 60px rgba(0,0,0,.35);text-align:center}
+#loginScreen{position:fixed;inset:0;overflow:hidden;display:flex;align-items:center;justify-content:center;flex-direction:column;z-index:10;
+  background:
+    radial-gradient(700px circle at 90% 8%, rgba(47,111,237,.35), transparent 55%),
+    radial-gradient(600px circle at 4% 96%, rgba(47,111,237,.25), transparent 55%),
+    linear-gradient(160deg,var(--navy-dark),var(--navy) 60%);
+}
+#loginScreen::before{content:'';position:absolute;inset:0;pointer-events:none;opacity:.35;
+  background-image: radial-gradient(rgba(255,255,255,.5) 1px, transparent 1px);
+  background-size:26px 26px;
+  -webkit-mask-image: radial-gradient(circle at 90% 8%, black, transparent 50%), radial-gradient(circle at 4% 96%, black, transparent 50%);
+  mask-image: radial-gradient(circle at 90% 8%, black, transparent 50%), radial-gradient(circle at 4% 96%, black, transparent 50%);
+}
+#loginScreen::after{content:'';position:absolute;left:-10%;right:-10%;bottom:-6%;height:220px;pointer-events:none;
+  background:linear-gradient(90deg, transparent, rgba(47,111,237,.55), transparent);
+  filter:blur(2px);border-radius:50%;transform:scaleX(1.4);
+}
+.heroLogo{height:64px;margin-bottom:16px;position:relative;z-index:1}
+#loginCard{position:relative;z-index:1;background:#fff;border-radius:16px;padding:36px 32px;width:340px;box-sizing:border-box;box-shadow:0 20px 60px rgba(0,0,0,.35);text-align:center}
 #loginCard h1{font-size:17px;margin:0 0 22px;color:var(--navy);font-weight:700}
 #loginTabs{display:flex;gap:0;margin-bottom:20px;border-radius:8px;overflow:hidden;border:1px solid var(--border)}
 #loginTabs div{flex:1;text-align:center;padding:9px;cursor:pointer;font-size:13px;font-weight:600;color:var(--muted);background:#f7f9fd;transition:background .15s,color .15s}
@@ -873,9 +901,9 @@ button:hover{background:var(--navy-light)}
 </style></head>
 <body>
 <div id="loginScreen">
-  <img src="/assets/ewu-logo.png" alt="East West University" />
+  <img class="heroLogo" src="/assets/logo.jpg" alt="AI Code Detection" />
   <div id="loginCard">
-    <h1>Student Tracker &mdash; Teacher Portal</h1>
+    <h1>Teacher Portal</h1>
     <div id="loginTabs">
       <div id="tabLogin" class="activeTab">Login</div>
       <div id="tabRegister">Register</div>
@@ -903,8 +931,8 @@ button:hover{background:var(--navy-light)}
   </div>
 </div>
 <header>
-  <img src="/assets/ewu-logo.png" alt="East West University" />
-  <div class="title"><h1>Student Tracker &mdash; Admin</h1><span>EAST WEST UNIVERSITY</span></div>
+  <span class="logoBadge"><img src="/assets/logo.jpg" alt="AI Code Detection" /></span>
+  <div class="title"><h1>Admin Panel</h1><span>AI CODE DETECTION TOOL</span></div>
   <button id="logoutBtn">Logout</button>
 </header>
 <div id="app">
