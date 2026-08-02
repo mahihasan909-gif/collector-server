@@ -280,6 +280,22 @@ app.get('/api/students/:id/sessions/:sessionId/csv', checkAdmin, async (req, res
   res.type('text/csv').send(buildCodeCsv(doc));
 });
 
+app.delete('/api/students/:id/sessions/:sessionId', checkAdmin, async (req, res) => {
+  const { id, sessionId } = req.params;
+  const sessRes = await sessionsCol.deleteOne({ studentId: id, sessionId });
+  await resultsCol.deleteOne({ studentId: id, sessionId });
+  if (!sessRes.deletedCount) return res.status(404).json({ error: 'not found' });
+  res.json({ ok: true });
+});
+
+app.get('/api/students/:id/sessions-csv', checkAdmin, async (req, res) => {
+  const docs = await sessionsCol.find({ studentId: req.params.id }).sort({ loginAt: -1 }).toArray();
+  const parts = [CODE_CSV_COLUMNS.join(',')];
+  for (const doc of docs) parts.push(...buildCodeCsvRows(doc));
+  res.setHeader('Content-Disposition', `attachment; filename="${safeName(req.params.id)}_all_sessions.csv"`);
+  res.type('text/csv').send(parts.join('\n'));
+});
+
 app.get('/api/download-all', checkAdmin, async (req, res) => {
   const docs = await sessionsCol.find({}).toArray();
   const parts = [CODE_CSV_COLUMNS.join(',')];
@@ -766,7 +782,10 @@ button:hover{background:var(--navy-light)}
   <button id="roomsBtn">Manage Rooms</button>
   <div id="studentList"></div>
 </div>
-<div class="col" id="sessions"><h2>Sessions</h2><div id="sessionList"></div></div>
+<div class="col" id="sessions"><h2>Sessions</h2>
+  <button id="downloadStudentAllBtn" style="display:none">Download All (this student)</button>
+  <div id="sessionList"></div>
+</div>
 <div class="col" id="roomsPanel" style="display:none;width:340px;border-right:1px solid var(--border)">
   <h2>Rooms (allowed student IDs)</h2>
   <input id="newRoomName" placeholder="Room name e.g. cse103" />
@@ -1017,6 +1036,9 @@ async function loadSessions(studentId){
   const sessions = await j('/api/students/' + encodeURIComponent(studentId) + '/sessions');
   const el = document.getElementById('sessionList');
   el.innerHTML = '';
+  const dlAllBtn = document.getElementById('downloadStudentAllBtn');
+  dlAllBtn.style.display = 'inline-block';
+  dlAllBtn.onclick = () => { window.location.href = '/api/students/' + encodeURIComponent(studentId) + '/sessions-csv'; };
   sessions.forEach(s => {
     const d = document.createElement('div');
     d.className = 'item session-row';
@@ -1029,8 +1051,20 @@ async function loadSessions(studentId){
     dl.className = 'dl';
     dl.textContent = 'CSV';
     dl.href = '/api/students/' + encodeURIComponent(studentId) + '/sessions/' + encodeURIComponent(s.sessionId) + '/csv';
+    const rm = document.createElement('a');
+    rm.className = 'dl';
+    rm.style.color = '#c0392b';
+    rm.textContent = 'Remove';
+    rm.href = '#';
+    rm.onclick = async (e) => {
+      e.preventDefault();
+      if (!confirm('Remove this session (' + started + ') permanently? This deletes its code, events, and feedback.')) return;
+      await fetch('/api/students/' + encodeURIComponent(studentId) + '/sessions/' + encodeURIComponent(s.sessionId), { method: 'DELETE' });
+      loadSessions(studentId);
+    };
     d.appendChild(left);
     d.appendChild(dl);
+    d.appendChild(rm);
     el.appendChild(d);
   });
 }
