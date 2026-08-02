@@ -767,7 +767,10 @@ button:hover{background:var(--navy-light)}
   <img src="/assets/ewu-logo.png" alt="East West University" />
   <h1>Student Tracker &mdash; Teacher Login</h1>
   <div id="loginError"></div>
-  <input id="loginPassword" type="password" placeholder="Admin password" autofocus />
+  <div style="position:relative;width:270px">
+    <input id="loginPassword" type="password" placeholder="Admin password" autofocus style="width:100%;padding-right:40px" />
+    <span id="togglePassword" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;color:#6b7280;font-size:16px;user-select:none">&#128065;</span>
+  </div>
   <button id="loginBtn">Login</button>
 </div>
 <header>
@@ -928,6 +931,13 @@ function showApp(){
   document.getElementById('app').style.display = 'flex';
   loadStudents();
 }
+
+document.getElementById('togglePassword').onclick = () => {
+  const input = document.getElementById('loginPassword');
+  const isHidden = input.type === 'password';
+  input.type = isHidden ? 'text' : 'password';
+  document.getElementById('togglePassword').textContent = isHidden ? '\u{1F576}\u{FE0F}' : '\u{1F441}\u{FE0F}';
+};
 
 document.getElementById('loginBtn').onclick = doLogin;
 document.getElementById('loginPassword').addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
