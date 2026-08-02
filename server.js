@@ -8,7 +8,8 @@ const API_KEY = process.env.API_KEY || '';
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
 const ALLOWED_DEPT = process.env.ALLOWED_DEPT_CODE || '60'; // e.g. 60 = CSE; empty = allow all
 const MONGODB_URI = process.env.MONGODB_URI || '';
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free';
 
 if (!API_KEY || !ADMIN_KEY) {
   console.error(
@@ -101,21 +102,26 @@ function buildCodeCsv(pkg) {
   return [CODE_CSV_COLUMNS.join(','), ...buildCodeCsvRows(pkg)].join('\n');
 }
 
-// --- Gemini (free tier) helper ---
-async function callGemini(prompt) {
-  if (!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY not configured on server');
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
-  const r = await fetch(url, {
+// --- OpenRouter (free tier) helper ---
+async function callAi(prompt) {
+  if (!OPENROUTER_API_KEY) throw new Error('OPENROUTER_API_KEY not configured on server');
+  const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: OPENROUTER_MODEL,
+      messages: [{ role: 'user', content: prompt }]
+    })
   });
   if (!r.ok) {
     const t = await r.text();
-    throw new Error(`Gemini API error ${r.status}: ${t.slice(0, 300)}`);
+    throw new Error(`OpenRouter API error ${r.status}: ${t.slice(0, 300)}`);
   }
   const data = await r.json();
-  return data?.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
+  return data?.choices?.[0]?.message?.content || '';
 }
 
 function summarizeStudentForAi(sessions) {
@@ -356,7 +362,7 @@ app.post('/admin/ai-generate/:studentId', checkAdmin, async (req, res) => {
 
   let aiFeedback;
   try {
-    aiFeedback = await callGemini(prompt);
+    aiFeedback = await callAi(prompt);
   } catch (err) {
     return res.status(502).json({ error: String(err.message || err) });
   }
@@ -462,7 +468,7 @@ app.post('/student/ai-hint', async (req, res) => {
     `Student's question: ${q}\n\nGive a short, encouraging, hint-only answer (max 150 words).`;
 
   try {
-    const answer = await callGemini(prompt);
+    const answer = await callAi(prompt);
     res.json({ answer });
   } catch (err) {
     res.status(502).json({ error: String(err.message || err) });
