@@ -875,7 +875,7 @@ button:hover{background:var(--navy-light)}
   background:linear-gradient(90deg, transparent, rgba(47,111,237,.55), transparent);
   filter:blur(2px);border-radius:50%;transform:scaleX(1.4);
 }
-.heroLogo{height:64px;margin-bottom:16px;position:relative;z-index:1}
+.loginCorner{position:absolute;top:28px;right:28px;width:64px;height:64px;z-index:2}
 #loginCard{position:relative;z-index:1;background:#fff;border-radius:16px;padding:36px 32px;width:340px;box-sizing:border-box;box-shadow:0 20px 60px rgba(0,0,0,.35);text-align:center}
 #loginCard h1{font-size:17px;margin:0 0 22px;color:var(--navy);font-weight:700}
 #loginTabs{display:flex;gap:0;margin-bottom:20px;border-radius:8px;overflow:hidden;border:1px solid var(--border)}
@@ -901,7 +901,7 @@ button:hover{background:var(--navy-light)}
 </style></head>
 <body>
 <div id="loginScreen">
-  <img class="heroLogo" src="/assets/logo.jpg" alt="AI Code Detection" />
+  <span class="logoBadge loginCorner"><img src="/assets/logo.jpg" alt="AI Code Detection" /></span>
   <div id="loginCard">
     <h1>Teacher Portal</h1>
     <div id="loginTabs">
