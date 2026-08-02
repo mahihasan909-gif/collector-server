@@ -40,7 +40,12 @@ async function connectDb() {
   resultsCol = db.collection('results');
   roomsCol = db.collection('rooms');
   await sessionsCol.createIndex({ studentId: 1, sessionId: 1 }, { unique: true });
-  await resultsCol.createIndex({ studentId: 1 }, { unique: true });
+  try {
+    await resultsCol.dropIndex('studentId_1');
+  } catch {
+    // old per-student-only index doesn't exist, nothing to drop
+  }
+  await resultsCol.createIndex({ studentId: 1, sessionId: 1 }, { unique: true });
   await roomsCol.createIndex({ roomName: 1 }, { unique: true });
   await roomsCol.createIndex({ studentIds: 1 });
   console.log('Connected to MongoDB.');
@@ -341,21 +346,21 @@ function parseIdList(input) {
   return [];
 }
 
-// --- AI-generated + manual feedback/result per student ---
+// --- AI-generated + manual feedback/result, scoped to one session ---
 
-app.post('/admin/ai-generate/:studentId', checkAdmin, async (req, res) => {
-  const studentId = req.params.studentId;
-  const sessions = await sessionsCol.find({ studentId }).sort({ loginAt: -1 }).toArray();
-  if (!sessions.length) return res.status(404).json({ error: 'no sessions for this student' });
+app.post('/admin/ai-generate/:studentId/:sessionId', checkAdmin, async (req, res) => {
+  const { studentId, sessionId } = req.params;
+  const session = await sessionsCol.findOne({ studentId, sessionId });
+  if (!session) return res.status(404).json({ error: 'session not found' });
 
-  const { totals, fileSummaries } = summarizeStudentForAi(sessions);
+  const { totals, fileSummaries } = summarizeStudentForAi([session]);
   const prompt =
     `You are a programming instructor's assistant helping evaluate a CSE student's coding activity ` +
     `for signs of good/bad practice and possible AI-assistance overuse, based on keystroke telemetry ` +
-    `and their code.\n\nActivity totals across ${totals.sessionCount} sessions: ${JSON.stringify(totals)}\n\n` +
+    `and their code, for ONE coding session.\n\nActivity totals for this session: ${JSON.stringify(totals)}\n\n` +
     `Per-file details:\n${fileSummaries.join('\n')}\n\n` +
     `Write a short, constructive feedback report (150-250 words) for the STUDENT to read, covering: ` +
-    `(1) what they're doing well, (2) specific areas to improve (coding habits, patterns, testing, etc.), ` +
+    `(1) what they're doing well in this session, (2) specific areas to improve (coding habits, patterns, testing, etc.), ` +
     `(3) if paste-burst/auto-format counts look unusually high relative to keystrokes, gently note it as ` +
     `something to be mindful of without accusing them of cheating. Be encouraging and specific, not generic. ` +
     `Do not include a numeric score.`;
@@ -368,45 +373,33 @@ app.post('/admin/ai-generate/:studentId', checkAdmin, async (req, res) => {
   }
 
   await resultsCol.updateOne(
-    { studentId },
-    { $set: { studentId, aiFeedback, aiGeneratedAt: Date.now() } },
+    { studentId, sessionId },
+    { $set: { studentId, sessionId, aiFeedback, aiGeneratedAt: Date.now() } },
     { upsert: true }
   );
   res.json({ ok: true, aiFeedback });
 });
 
-app.get('/admin/result/:studentId', checkAdmin, async (req, res) => {
-  const doc = await resultsCol.findOne({ studentId: req.params.studentId });
-  res.json(doc || { studentId: req.params.studentId });
+app.get('/admin/result/:studentId/:sessionId', checkAdmin, async (req, res) => {
+  const { studentId, sessionId } = req.params;
+  const doc = await resultsCol.findOne({ studentId, sessionId });
+  res.json(doc || { studentId, sessionId });
 });
 
-app.post('/admin/result/:studentId', checkAdmin, async (req, res) => {
-  const studentId = req.params.studentId;
+app.post('/admin/result/:studentId/:sessionId', checkAdmin, async (req, res) => {
+  const { studentId, sessionId } = req.params;
   const { feedback, published } = req.body || {};
-  const update = { studentId, finalFeedback: feedback ?? '', updatedAt: Date.now() };
+  const update = { studentId, sessionId, finalFeedback: feedback ?? '', updatedAt: Date.now() };
   if (published !== undefined) update.published = Boolean(published);
   if (published === true) update.publishedAt = Date.now();
-  await resultsCol.updateOne({ studentId }, { $set: update }, { upsert: true });
-  const doc = await resultsCol.findOne({ studentId });
+  await resultsCol.updateOne({ studentId, sessionId }, { $set: update }, { upsert: true });
+  const doc = await resultsCol.findOne({ studentId, sessionId });
   res.json(doc);
 });
 
 // --- student-facing endpoints (ID only, no password) ---
 
-app.get('/student/result', async (req, res) => {
-  const studentId = (req.query.studentId || '').toString().trim();
-  if (!studentId) return res.status(400).json({ error: 'studentId required' });
-  if (!(await isStudentAllowed(studentId))) return res.status(403).json({ error: 'this student ID is not on any active room roster' });
-  const exists = await sessionsCol.findOne({ studentId }, { projection: { _id: 1 } });
-  if (!exists) return res.status(404).json({ error: 'no such student id on record' });
-  const result = await resultsCol.findOne({ studentId });
-  if (!result || !result.published) {
-    return res.json({ studentId, published: false, feedback: null });
-  }
-  res.json({ studentId, published: true, feedback: result.finalFeedback || '', updatedAt: result.updatedAt });
-});
-
-// Full student dashboard: room membership, session list, published feedback (used by /student page login).
+// Full student dashboard: room membership, session list with per-session publish status (used by /student page login).
 app.get('/student/me', async (req, res) => {
   const studentId = (req.query.studentId || '').toString().trim();
   if (!studentId) return res.status(400).json({ error: 'studentId required' });
@@ -414,36 +407,42 @@ app.get('/student/me', async (req, res) => {
   if (!room) return res.status(403).json({ error: 'This student ID is not on any active room roster. Ask your instructor to add you.' });
 
   const sessions = await sessionsCol.find({ studentId }).sort({ loginAt: -1 }).toArray();
-  const result = await resultsCol.findOne({ studentId });
+  const results = await resultsCol.find({ studentId }).toArray();
+  const resultBySession = new Map(results.map((r) => [r.sessionId, r]));
 
   res.json({
     studentId,
     roomName: room.roomName,
-    sessions: sessions.map((s) => ({
-      sessionId: s.sessionId,
-      loginAt: s.loginAt,
-      logoutAt: s.logoutAt,
-      fileCount: (s.files || []).length,
-      eventCount: (s.events || []).length
-    })),
-    published: Boolean(result && result.published),
-    feedback: result && result.published ? result.finalFeedback || '' : null
+    sessions: sessions.map((s) => {
+      const r = resultBySession.get(s.sessionId);
+      return {
+        sessionId: s.sessionId,
+        loginAt: s.loginAt,
+        logoutAt: s.logoutAt,
+        fileCount: (s.files || []).length,
+        eventCount: (s.events || []).length,
+        hasFeedback: Boolean(r && r.published)
+      };
+    })
   });
 });
 
-// A single one of the student's own sessions, with their code files (read-only, no admin auth needed —
-// gated by room membership, same as /student/me).
+// A single one of the student's own sessions: code files + published feedback for that session
+// (read-only, no admin auth needed — gated by room membership, same as /student/me).
 app.get('/student/sessions/:sessionId', async (req, res) => {
   const studentId = (req.query.studentId || '').toString().trim();
   if (!studentId) return res.status(400).json({ error: 'studentId required' });
   if (!(await isStudentAllowed(studentId))) return res.status(403).json({ error: 'not allowed' });
   const doc = await sessionsCol.findOne({ studentId, sessionId: req.params.sessionId });
   if (!doc) return res.status(404).json({ error: 'not found' });
+  const result = await resultsCol.findOne({ studentId, sessionId: req.params.sessionId });
   res.json({
     sessionId: doc.sessionId,
     loginAt: doc.loginAt,
     logoutAt: doc.logoutAt,
-    files: (doc.files || []).map((f) => ({ path: f.path, language: f.language, content: f.content }))
+    files: (doc.files || []).map((f) => ({ path: f.path, language: f.language, content: f.content })),
+    published: Boolean(result && result.published),
+    feedback: result && result.published ? result.finalFeedback || '' : null
   });
 });
 
@@ -547,7 +546,8 @@ pre{background:#f7f9fd;border:1px solid var(--border);padding:12px;border-radius
 <div id="dashView" class="dash" style="display:none">
   <div class="card">
     <h3>Feedback &amp; Result</h3>
-    <div id="feedbackBox">Loading...</div>
+    <div id="feedbackSessionLabel" style="font-size:13px;color:var(--muted);margin-bottom:8px">Select a session below to view its feedback.</div>
+    <div id="feedbackBox" style="display:none"></div>
   </div>
   <div class="card" style="display:flex;gap:24px;flex-wrap:wrap">
     <div style="flex:1;min-width:240px">
@@ -624,11 +624,6 @@ async function login(){
 }
 
 function renderDashboard(data){
-  const fb = document.getElementById('feedbackBox');
-  fb.textContent = data.published
-    ? data.feedback
-    : 'No feedback published yet. Check back later after your instructor reviews your work.';
-
   const list = document.getElementById('sessionList');
   list.innerHTML = '';
   if (!data.sessions.length) {
@@ -639,22 +634,30 @@ function renderDashboard(data){
     const row = document.createElement('div');
     row.className = 'sessRow';
     const when = new Date(s.loginAt).toLocaleString();
-    row.innerHTML = '<span>' + when + '</span><span class="badge">' + s.fileCount + ' files</span>';
+    row.innerHTML = '<span>' + when + (s.hasFeedback ? ' <span class="badge">Feedback ready</span>' : '') + '</span><span class="badge">' + s.fileCount + ' files</span>';
     row.onclick = () => {
       document.querySelectorAll('.sessRow').forEach((x) => x.classList.remove('active'));
       row.classList.add('active');
-      loadCode(s.sessionId);
+      loadCode(s.sessionId, when);
     };
     list.appendChild(row);
   });
 }
 
-async function loadCode(sessionId){
+async function loadCode(sessionId, whenLabel){
   const view = document.getElementById('codeView');
   view.textContent = 'Loading...';
   const r = await fetch('/student/sessions/' + encodeURIComponent(sessionId) + '?studentId=' + encodeURIComponent(sid));
   const data = await r.json();
   if (!r.ok) { view.textContent = data.error || 'Error loading session.'; return; }
+
+  document.getElementById('feedbackSessionLabel').textContent = 'Session: ' + whenLabel;
+  const fb = document.getElementById('feedbackBox');
+  fb.style.display = 'block';
+  fb.textContent = data.published
+    ? data.feedback
+    : 'No feedback published for this session yet. Check back later after your instructor reviews it.';
+
   if (!data.files.length) { view.textContent = 'No files recorded in this session.'; return; }
   view.innerHTML = '';
   data.files.forEach((f) => {
@@ -782,6 +785,7 @@ button:hover{background:var(--navy-light)}
     <span id="aiModalClose">&times;</span>
     <h2>AI Feedback Assistant</h2>
     <select id="aiStudentSelect"><option value="">Select a student...</option></select>
+    <select id="aiSessionSelect" style="display:none"><option value="">Select a session...</option></select>
     <div id="aiModalBody" style="display:none">
       <button id="aiGenBtn">Generate AI Feedback</button>
       <span id="aiGenStatus" style="font-size:11px;color:var(--muted);margin-left:8px"></span>
@@ -798,12 +802,13 @@ button:hover{background:var(--navy-light)}
 
 <script>
 let currentFeedbackStudentId = '';
+let currentFeedbackSessionId = '';
 let allStudentIds = [];
 
 document.getElementById('aiFab').onclick = () => {
   document.getElementById('aiModalOverlay').style.display = 'flex';
   populateAiStudentSelect();
-  if (currentFeedbackStudentId) loadFeedback(currentFeedbackStudentId);
+  if (currentFeedbackStudentId) populateAiSessionSelect(currentFeedbackStudentId);
 };
 document.getElementById('aiModalClose').onclick = () => {
   document.getElementById('aiModalOverlay').style.display = 'none';
@@ -824,24 +829,49 @@ function populateAiStudentSelect(){
 }
 
 document.getElementById('aiStudentSelect').onchange = (e) => {
-  if (e.target.value) loadFeedback(e.target.value);
+  document.getElementById('aiModalBody').style.display = 'none';
+  if (e.target.value) populateAiSessionSelect(e.target.value);
+  else document.getElementById('aiSessionSelect').style.display = 'none';
+};
+
+async function populateAiSessionSelect(studentId){
+  currentFeedbackStudentId = studentId;
+  const sessSel = document.getElementById('aiSessionSelect');
+  sessSel.style.display = 'block';
+  sessSel.innerHTML = '<option value="">Select a session...</option>';
+  const sessions = await j('/api/students/' + encodeURIComponent(studentId) + '/sessions');
+  sessions.forEach((s) => {
+    const opt = document.createElement('option');
+    opt.value = s.sessionId;
+    opt.textContent = new Date(s.loginAt).toLocaleString();
+    if (s.sessionId === currentFeedbackSessionId) opt.selected = true;
+    sessSel.appendChild(opt);
+  });
+  if (currentFeedbackSessionId && sessions.some((s) => s.sessionId === currentFeedbackSessionId)) {
+    loadFeedback(studentId, currentFeedbackSessionId);
+  }
+}
+
+document.getElementById('aiSessionSelect').onchange = (e) => {
+  if (e.target.value) loadFeedback(currentFeedbackStudentId, e.target.value);
   else document.getElementById('aiModalBody').style.display = 'none';
 };
 
-async function loadFeedback(studentId){
+async function loadFeedback(studentId, sessionId){
   currentFeedbackStudentId = studentId;
+  currentFeedbackSessionId = sessionId;
   document.getElementById('aiModalBody').style.display = 'block';
   document.getElementById('aiGenStatus').textContent = '';
   document.getElementById('publishStatus').textContent = '';
-  const doc = await j('/admin/result/' + encodeURIComponent(studentId));
+  const doc = await j('/admin/result/' + encodeURIComponent(studentId) + '/' + encodeURIComponent(sessionId));
   document.getElementById('feedbackText').value = doc.finalFeedback || doc.aiFeedback || '';
   document.getElementById('publishStatus').textContent = doc.published ? 'Published' : 'Not published';
 }
 
 document.getElementById('aiGenBtn').onclick = async () => {
-  if (!currentFeedbackStudentId) return;
+  if (!currentFeedbackStudentId || !currentFeedbackSessionId) return;
   document.getElementById('aiGenStatus').textContent = 'Generating...';
-  const r = await fetch('/admin/ai-generate/' + encodeURIComponent(currentFeedbackStudentId), { method: 'POST' });
+  const r = await fetch('/admin/ai-generate/' + encodeURIComponent(currentFeedbackStudentId) + '/' + encodeURIComponent(currentFeedbackSessionId), { method: 'POST' });
   const data = await r.json();
   if (!r.ok) { document.getElementById('aiGenStatus').textContent = 'Error: ' + (data.error || 'failed'); return; }
   document.getElementById('feedbackText').value = data.aiFeedback;
@@ -849,9 +879,9 @@ document.getElementById('aiGenBtn').onclick = async () => {
 };
 
 async function saveResult(published){
-  if (!currentFeedbackStudentId) return;
+  if (!currentFeedbackStudentId || !currentFeedbackSessionId) return;
   const feedback = document.getElementById('feedbackText').value;
-  const r = await fetch('/admin/result/' + encodeURIComponent(currentFeedbackStudentId), {
+  const r = await fetch('/admin/result/' + encodeURIComponent(currentFeedbackStudentId) + '/' + encodeURIComponent(currentFeedbackSessionId), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ feedback, published })
@@ -994,7 +1024,7 @@ async function loadSessions(studentId){
     const left = document.createElement('span');
     left.textContent = started;
     left.innerHTML += '<div class="badge">' + s.eventCount + ' events</div>';
-    left.onclick = () => { document.querySelectorAll('#sessionList .item').forEach(x=>x.classList.remove('active')); d.classList.add('active'); loadDetail(studentId, s.sessionId); };
+    left.onclick = () => { document.querySelectorAll('#sessionList .item').forEach(x=>x.classList.remove('active')); d.classList.add('active'); loadDetail(studentId, s.sessionId); currentFeedbackStudentId = studentId; currentFeedbackSessionId = s.sessionId; };
     const dl = document.createElement('a');
     dl.className = 'dl';
     dl.textContent = 'CSV';
