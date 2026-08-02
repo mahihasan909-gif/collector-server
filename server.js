@@ -1,21 +1,28 @@
 const express = require('express');
 const crypto = require('crypto');
 const path = require('path');
+const bcrypt = require('bcryptjs');
 const { MongoClient } = require('mongodb');
 
 const PORT = process.env.PORT || 4000;
 const API_KEY = process.env.API_KEY || '';
-const ADMIN_KEY = process.env.ADMIN_KEY || '';
-const ALLOWED_DEPT = process.env.ALLOWED_DEPT_CODE || '60'; // e.g. 60 = CSE; empty = allow all
+const INVITE_CODE = process.env.INVITE_CODE || '';
 const MONGODB_URI = process.env.MONGODB_URI || '';
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'openai/gpt-oss-20b:free';
 
-if (!API_KEY || !ADMIN_KEY) {
+if (!API_KEY) {
   console.error(
-    'Refusing to start with no auth configured. Set API_KEY and ADMIN_KEY env vars before running ' +
-      '(anyone on the network could otherwise read/write student data). Example:\n' +
-      '  set API_KEY=some-secret\n  set ADMIN_KEY=some-other-secret\n  npm start'
+    'Refusing to start with no API_KEY set (the VS Code extension needs this to upload sessions). ' +
+      'Example:\n  set API_KEY=some-secret\n  npm start'
+  );
+  process.exit(1);
+}
+
+if (!INVITE_CODE) {
+  console.error(
+    'Refusing to start with no INVITE_CODE set (teachers need this to register an admin account). ' +
+      'Example:\n  set INVITE_CODE=some-secret-phrase\n  npm start'
   );
   process.exit(1);
 }
@@ -31,6 +38,7 @@ if (!MONGODB_URI) {
 let sessionsCol;
 let resultsCol;
 let roomsCol;
+let adminsCol;
 
 async function connectDb() {
   const client = new MongoClient(MONGODB_URI);
@@ -39,6 +47,7 @@ async function connectDb() {
   sessionsCol = db.collection('sessions');
   resultsCol = db.collection('results');
   roomsCol = db.collection('rooms');
+  adminsCol = db.collection('admins');
   await sessionsCol.createIndex({ studentId: 1, sessionId: 1 }, { unique: true });
   try {
     await resultsCol.dropIndex('studentId_1');
@@ -48,7 +57,21 @@ async function connectDb() {
   await resultsCol.createIndex({ studentId: 1, sessionId: 1 }, { unique: true });
   await roomsCol.createIndex({ roomName: 1 }, { unique: true });
   await roomsCol.createIndex({ studentIds: 1 });
+  await adminsCol.createIndex({ username: 1 }, { unique: true });
   console.log('Connected to MongoDB.');
+}
+
+// Every studentId in any room owned by this admin — used to scope all admin data queries.
+async function ownedStudentIds(adminUsername) {
+  const rooms = await roomsCol.find({ ownerAdmin: adminUsername }).toArray();
+  const ids = new Set();
+  for (const r of rooms) for (const id of r.studentIds || []) ids.add(id);
+  return ids;
+}
+
+function deptCodeOf(studentId) {
+  const parts = String(studentId).split('-');
+  return parts.length >= 3 ? parts[2] : '';
 }
 
 async function isStudentAllowed(studentId) {
@@ -170,9 +193,6 @@ app.post('/session', async (req, res) => {
   if (!pkg || !pkg.studentId || !pkg.sessionId) {
     return res.status(400).json({ error: 'studentId and sessionId required' });
   }
-  if (ALLOWED_DEPT && pkg.deptCode !== ALLOWED_DEPT) {
-    return res.status(403).json({ error: `dept code ${pkg.deptCode} not accepted here (expected ${ALLOWED_DEPT})` });
-  }
   if (!(await isStudentAllowed(pkg.studentId))) {
     return res.status(403).json({ error: 'this student ID is not on any active room roster' });
   }
@@ -188,9 +208,9 @@ app.post('/session', async (req, res) => {
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// --- admin/teacher panel: simple cookie-based login, no key-in-URL needed ---
+// --- admin/teacher panel: per-teacher accounts, cookie session maps to a username ---
 const COOKIE_NAME = 'tracker_admin';
-const adminSessions = new Set();
+const adminSessions = new Map(); // token -> username
 
 function parseCookies(req) {
   const header = req.headers.cookie || '';
@@ -203,25 +223,53 @@ function parseCookies(req) {
   return out;
 }
 
-function isAuthed(req) {
+function currentAdmin(req) {
   const cookies = parseCookies(req);
-  return Boolean(cookies[COOKIE_NAME] && adminSessions.has(cookies[COOKIE_NAME]));
+  const token = cookies[COOKIE_NAME];
+  return token ? adminSessions.get(token) : undefined;
 }
 
 function checkAdmin(req, res, next) {
-  if (isAuthed(req) || req.query.key === ADMIN_KEY) return next();
-  res.status(401).json({ error: 'not logged in' });
+  const username = currentAdmin(req);
+  if (!username) return res.status(401).json({ error: 'not logged in' });
+  req.adminUsername = username;
+  next();
 }
 
-app.post('/admin/login', (req, res) => {
-  const password = (req.body && req.body.password) || '';
-  if (password !== ADMIN_KEY) {
-    return res.status(401).json({ error: 'wrong password' });
-  }
+function startSession(res, username) {
   const token = crypto.randomBytes(24).toString('hex');
-  adminSessions.add(token);
+  adminSessions.set(token, username);
   res.setHeader('Set-Cookie', `${COOKIE_NAME}=${token}; HttpOnly; Path=/; Max-Age=43200; SameSite=Lax`);
-  res.json({ ok: true });
+}
+
+app.post('/admin/register', async (req, res) => {
+  const { username, password, inviteCode } = req.body || {};
+  if (inviteCode !== INVITE_CODE) return res.status(403).json({ error: 'wrong invite code' });
+  const uname = (username || '').toString().trim();
+  const pass = (password || '').toString();
+  if (!uname || pass.length < 6) {
+    return res.status(400).json({ error: 'username required, password must be 6+ characters' });
+  }
+  const passwordHash = await bcrypt.hash(pass, 10);
+  try {
+    await adminsCol.insertOne({ username: uname, passwordHash, createdAt: Date.now() });
+  } catch (err) {
+    if (err.code === 11000) return res.status(409).json({ error: 'username already taken' });
+    throw err;
+  }
+  startSession(res, uname);
+  res.json({ ok: true, username: uname });
+});
+
+app.post('/admin/login', async (req, res) => {
+  const { username, password } = req.body || {};
+  const uname = (username || '').toString().trim();
+  const admin = await adminsCol.findOne({ username: uname });
+  if (!admin || !(await bcrypt.compare(password || '', admin.passwordHash))) {
+    return res.status(401).json({ error: 'wrong username or password' });
+  }
+  startSession(res, uname);
+  res.json({ ok: true, username: uname });
 });
 
 app.post('/admin/logout', (req, res) => {
@@ -231,9 +279,14 @@ app.post('/admin/logout', (req, res) => {
   res.json({ ok: true });
 });
 
+app.get('/admin/me', checkAdmin, (req, res) => {
+  res.json({ username: req.adminUsername });
+});
+
 app.get('/api/students', checkAdmin, async (req, res) => {
+  const owned = await ownedStudentIds(req.adminUsername);
   const docs = await sessionsCol
-    .find({}, { projection: { studentId: 1, deptCode: 1, logoutAt: 1 } })
+    .find({ studentId: { $in: Array.from(owned) } }, { projection: { studentId: 1, deptCode: 1, logoutAt: 1 } })
     .toArray();
   const byId = new Map();
   for (const d of docs) {
@@ -250,7 +303,17 @@ app.get('/api/students', checkAdmin, async (req, res) => {
   res.json(students);
 });
 
+async function assertOwnsStudent(req, res, studentId) {
+  const owned = await ownedStudentIds(req.adminUsername);
+  if (!owned.has(studentId)) {
+    res.status(403).json({ error: 'not your student' });
+    return false;
+  }
+  return true;
+}
+
 app.get('/api/students/:id/sessions', checkAdmin, async (req, res) => {
+  if (!(await assertOwnsStudent(req, res, req.params.id))) return;
   const docs = await sessionsCol
     .find({ studentId: req.params.id })
     .sort({ loginAt: -1 })
@@ -268,12 +331,14 @@ app.get('/api/students/:id/sessions', checkAdmin, async (req, res) => {
 });
 
 app.get('/api/students/:id/sessions/:sessionId', checkAdmin, async (req, res) => {
+  if (!(await assertOwnsStudent(req, res, req.params.id))) return;
   const doc = await sessionsCol.findOne({ studentId: req.params.id, sessionId: req.params.sessionId });
   if (!doc) return res.status(404).json({ error: 'not found' });
   res.json(doc);
 });
 
 app.get('/api/students/:id/sessions/:sessionId/csv', checkAdmin, async (req, res) => {
+  if (!(await assertOwnsStudent(req, res, req.params.id))) return;
   const doc = await sessionsCol.findOne({ studentId: req.params.id, sessionId: req.params.sessionId });
   if (!doc) return res.status(404).send('not found');
   res.setHeader('Content-Disposition', `attachment; filename="${safeName(req.params.id)}_${safeName(req.params.sessionId)}_code.csv"`);
@@ -281,6 +346,7 @@ app.get('/api/students/:id/sessions/:sessionId/csv', checkAdmin, async (req, res
 });
 
 app.delete('/api/students/:id/sessions/:sessionId', checkAdmin, async (req, res) => {
+  if (!(await assertOwnsStudent(req, res, req.params.id))) return;
   const { id, sessionId } = req.params;
   const sessRes = await sessionsCol.deleteOne({ studentId: id, sessionId });
   await resultsCol.deleteOne({ studentId: id, sessionId });
@@ -289,6 +355,7 @@ app.delete('/api/students/:id/sessions/:sessionId', checkAdmin, async (req, res)
 });
 
 app.get('/api/students/:id/sessions-csv', checkAdmin, async (req, res) => {
+  if (!(await assertOwnsStudent(req, res, req.params.id))) return;
   const docs = await sessionsCol.find({ studentId: req.params.id }).sort({ loginAt: -1 }).toArray();
   const parts = [CODE_CSV_COLUMNS.join(',')];
   for (const doc of docs) parts.push(...buildCodeCsvRows(doc));
@@ -297,7 +364,8 @@ app.get('/api/students/:id/sessions-csv', checkAdmin, async (req, res) => {
 });
 
 app.get('/api/download-all', checkAdmin, async (req, res) => {
-  const docs = await sessionsCol.find({}).toArray();
+  const owned = await ownedStudentIds(req.adminUsername);
+  const docs = await sessionsCol.find({ studentId: { $in: Array.from(owned) } }).toArray();
   const parts = [CODE_CSV_COLUMNS.join(',')];
   for (const doc of docs) {
     parts.push(...buildCodeCsvRows(doc));
@@ -306,19 +374,21 @@ app.get('/api/download-all', checkAdmin, async (req, res) => {
   res.type('text/csv').send(parts.join('\n'));
 });
 
-// --- rooms: whitelist of student IDs allowed to use extension + student panel ---
+// --- rooms: whitelist of student IDs allowed to use extension + student panel, owned by one admin ---
 
 app.get('/admin/rooms', checkAdmin, async (req, res) => {
-  const rooms = await roomsCol.find({}).toArray();
-  res.json(rooms.map((r) => ({ roomName: r.roomName, studentIds: r.studentIds || [], createdAt: r.createdAt })));
+  const rooms = await roomsCol.find({ ownerAdmin: req.adminUsername }).toArray();
+  res.json(rooms.map((r) => ({ roomName: r.roomName, studentIds: r.studentIds || [], idPrefix: r.idPrefix || '', createdAt: r.createdAt })));
 });
 
 app.post('/admin/rooms', checkAdmin, async (req, res) => {
   const roomName = (req.body?.roomName || '').toString().trim();
   if (!roomName) return res.status(400).json({ error: 'roomName required' });
-  const ids = parseIdList(req.body?.studentIds);
+  const idPrefix = (req.body?.idPrefix || '').toString().trim();
+  let ids = parseIdList(req.body?.studentIds);
+  if (idPrefix) ids = ids.filter((id) => deptCodeOf(id) === idPrefix);
   try {
-    await roomsCol.insertOne({ roomName, studentIds: ids, createdAt: Date.now() });
+    await roomsCol.insertOne({ roomName, studentIds: ids, idPrefix, ownerAdmin: req.adminUsername, createdAt: Date.now() });
   } catch (err) {
     if (err.code === 11000) return res.status(409).json({ error: 'room already exists' });
     throw err;
@@ -326,30 +396,45 @@ app.post('/admin/rooms', checkAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
+async function assertOwnsRoom(req, res, roomName) {
+  const room = await roomsCol.findOne({ roomName });
+  if (!room || room.ownerAdmin !== req.adminUsername) {
+    res.status(404).json({ error: 'room not found' });
+    return null;
+  }
+  return room;
+}
+
 app.post('/admin/rooms/:roomName/students', checkAdmin, async (req, res) => {
-  const roomName = req.params.roomName;
-  const ids = parseIdList(req.body?.studentIds);
+  const room = await assertOwnsRoom(req, res, req.params.roomName);
+  if (!room) return;
+  let ids = parseIdList(req.body?.studentIds);
   if (!ids.length) return res.status(400).json({ error: 'studentIds required' });
-  const result = await roomsCol.updateOne({ roomName }, { $addToSet: { studentIds: { $each: ids } } });
-  if (!result.matchedCount) return res.status(404).json({ error: 'room not found' });
-  res.json({ ok: true });
+  const rejected = room.idPrefix ? ids.filter((id) => deptCodeOf(id) !== room.idPrefix) : [];
+  if (room.idPrefix) ids = ids.filter((id) => deptCodeOf(id) === room.idPrefix);
+  await roomsCol.updateOne({ roomName: room.roomName }, { $addToSet: { studentIds: { $each: ids } } });
+  res.json({ ok: true, added: ids.length, rejected: rejected.length, rejectedIds: rejected });
 });
 
 app.delete('/admin/rooms/:roomName/students/:studentId', checkAdmin, async (req, res) => {
-  await roomsCol.updateOne({ roomName: req.params.roomName }, { $pull: { studentIds: req.params.studentId } });
+  const room = await assertOwnsRoom(req, res, req.params.roomName);
+  if (!room) return;
+  await roomsCol.updateOne({ roomName: room.roomName }, { $pull: { studentIds: req.params.studentId } });
   res.json({ ok: true });
 });
 
 app.delete('/admin/rooms/:roomName', checkAdmin, async (req, res) => {
-  await roomsCol.deleteOne({ roomName: req.params.roomName });
+  const room = await assertOwnsRoom(req, res, req.params.roomName);
+  if (!room) return;
+  await roomsCol.deleteOne({ roomName: room.roomName });
   res.json({ ok: true });
 });
 
 // Danger zone: wipe all collected session/result data for every student ID in this room.
 // The room roster itself (allowed IDs) is left intact.
 app.delete('/admin/rooms/:roomName/data', checkAdmin, async (req, res) => {
-  const room = await roomsCol.findOne({ roomName: req.params.roomName });
-  if (!room) return res.status(404).json({ error: 'room not found' });
+  const room = await assertOwnsRoom(req, res, req.params.roomName);
+  if (!room) return;
   const ids = room.studentIds || [];
   const sessRes = await sessionsCol.deleteMany({ studentId: { $in: ids } });
   const resRes = await resultsCol.deleteMany({ studentId: { $in: ids } });
@@ -366,6 +451,7 @@ function parseIdList(input) {
 
 app.post('/admin/ai-generate/:studentId/:sessionId', checkAdmin, async (req, res) => {
   const { studentId, sessionId } = req.params;
+  if (!(await assertOwnsStudent(req, res, studentId))) return;
   const session = await sessionsCol.findOne({ studentId, sessionId });
   if (!session) return res.status(404).json({ error: 'session not found' });
 
@@ -398,12 +484,14 @@ app.post('/admin/ai-generate/:studentId/:sessionId', checkAdmin, async (req, res
 
 app.get('/admin/result/:studentId/:sessionId', checkAdmin, async (req, res) => {
   const { studentId, sessionId } = req.params;
+  if (!(await assertOwnsStudent(req, res, studentId))) return;
   const doc = await resultsCol.findOne({ studentId, sessionId });
   res.json(doc || { studentId, sessionId });
 });
 
 app.post('/admin/result/:studentId/:sessionId', checkAdmin, async (req, res) => {
   const { studentId, sessionId } = req.params;
+  if (!(await assertOwnsStudent(req, res, studentId))) return;
   const { feedback, published } = req.body || {};
   const update = { studentId, sessionId, finalFeedback: feedback ?? '', updatedAt: Date.now() };
   if (published !== undefined) update.published = Boolean(published);
@@ -491,7 +579,7 @@ app.post('/student/ai-hint', async (req, res) => {
 });
 
 app.get('/admin', (_req, res) => {
-  res.type('html').send(ADMIN_HTML.replace('__DEFAULT_DEPT__', ALLOWED_DEPT));
+  res.type('html').send(ADMIN_HTML);
 });
 
 app.get('/student', (_req, res) => {
@@ -765,13 +853,31 @@ button:hover{background:var(--navy-light)}
 <body>
 <div id="loginScreen">
   <img src="/assets/ewu-logo.png" alt="East West University" />
-  <h1>Student Tracker &mdash; Teacher Login</h1>
-  <div id="loginError"></div>
-  <div style="position:relative;width:270px">
-    <input id="loginPassword" type="password" placeholder="Admin password" autofocus style="width:100%;padding-right:40px" />
-    <span id="togglePassword" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;color:#6b7280;font-size:16px;user-select:none">&#128065;</span>
+  <h1>Student Tracker &mdash; Teacher Portal</h1>
+  <div style="display:flex;gap:0;margin-bottom:14px;width:270px;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,.3)">
+    <div id="tabLogin" style="flex:1;text-align:center;padding:8px;cursor:pointer;background:rgba(255,255,255,.9);color:var(--navy);font-size:13px;font-weight:600">Login</div>
+    <div id="tabRegister" style="flex:1;text-align:center;padding:8px;cursor:pointer;color:#fff;font-size:13px;font-weight:600">Register</div>
   </div>
-  <button id="loginBtn">Login</button>
+  <div id="loginError"></div>
+
+  <div id="loginForm">
+    <input id="loginUsername" placeholder="Username" autofocus />
+    <div style="position:relative;width:270px">
+      <input id="loginPassword" type="password" placeholder="Password" style="width:100%;padding-right:40px" />
+      <span class="togglePassword" data-target="loginPassword" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;color:#6b7280;font-size:16px;user-select:none">&#128065;</span>
+    </div>
+    <button id="loginBtn">Login</button>
+  </div>
+
+  <div id="registerForm" style="display:none">
+    <input id="regUsername" placeholder="Choose a username" />
+    <div style="position:relative;width:270px">
+      <input id="regPassword" type="password" placeholder="Choose a password (6+ chars)" style="width:100%;padding-right:40px" />
+      <span class="togglePassword" data-target="regPassword" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;color:#6b7280;font-size:16px;user-select:none">&#128065;</span>
+    </div>
+    <input id="regInviteCode" placeholder="Invite code (ask your admin)" />
+    <button id="registerBtn">Create Account</button>
+  </div>
 </div>
 <header>
   <img src="/assets/ewu-logo.png" alt="East West University" />
@@ -780,7 +886,7 @@ button:hover{background:var(--navy-light)}
 </header>
 <div id="app">
 <div class="col" id="students"><h2>Students</h2>
-  <input id="deptFilter" placeholder="Dept code filter (blank = all)" value="__DEFAULT_DEPT__" />
+  <input id="deptFilter" placeholder="Dept code filter (blank = all)" value="" />
   <button id="downloadAllBtn">Download All (CSV)</button>
   <button id="roomsBtn">Manage Rooms</button>
   <div id="studentList"></div>
@@ -792,6 +898,7 @@ button:hover{background:var(--navy-light)}
 <div class="col" id="roomsPanel" style="display:none;width:340px;border-right:1px solid var(--border)">
   <h2>Rooms (allowed student IDs)</h2>
   <input id="newRoomName" placeholder="Room name e.g. cse103" />
+  <input id="newRoomIdPrefix" placeholder="ID prefix filter, e.g. 60 (blank = any dept)" />
   <button id="createRoomBtn">Create Room</button>
   <div id="roomList" style="margin-top:12px"></div>
 </div>
@@ -926,31 +1033,65 @@ function showLogin(){
   document.getElementById('app').style.display = 'none';
   document.getElementById('loginScreen').style.display = 'flex';
 }
-function showApp(){
+function showApp(username){
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('app').style.display = 'flex';
+  if (username) document.querySelector('header .title span').textContent = 'EAST WEST UNIVERSITY — ' + username;
   loadStudents();
 }
 
-document.getElementById('togglePassword').onclick = () => {
-  const input = document.getElementById('loginPassword');
-  const isHidden = input.type === 'password';
-  input.type = isHidden ? 'text' : 'password';
-  document.getElementById('togglePassword').textContent = isHidden ? '\u{1F576}\u{FE0F}' : '\u{1F441}\u{FE0F}';
-};
+document.querySelectorAll('.togglePassword').forEach((el) => {
+  el.onclick = () => {
+    const input = document.getElementById(el.dataset.target);
+    const isHidden = input.type === 'password';
+    input.type = isHidden ? 'text' : 'password';
+    el.textContent = isHidden ? '\u{1F576}\u{FE0F}' : '\u{1F441}\u{FE0F}';
+  };
+});
+
+document.getElementById('tabLogin').onclick = () => switchTab('login');
+document.getElementById('tabRegister').onclick = () => switchTab('register');
+function switchTab(which){
+  const isLogin = which === 'login';
+  document.getElementById('loginForm').style.display = isLogin ? 'block' : 'none';
+  document.getElementById('registerForm').style.display = isLogin ? 'none' : 'block';
+  document.getElementById('tabLogin').style.background = isLogin ? 'rgba(255,255,255,.9)' : 'transparent';
+  document.getElementById('tabLogin').style.color = isLogin ? 'var(--navy)' : '#fff';
+  document.getElementById('tabRegister').style.background = isLogin ? 'transparent' : 'rgba(255,255,255,.9)';
+  document.getElementById('tabRegister').style.color = isLogin ? '#fff' : 'var(--navy)';
+  document.getElementById('loginError').textContent = '';
+}
 
 document.getElementById('loginBtn').onclick = doLogin;
 document.getElementById('loginPassword').addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
 
 async function doLogin(){
+  const username = document.getElementById('loginUsername').value.trim();
   const password = document.getElementById('loginPassword').value;
   const r = await fetch('/admin/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password })
+    body: JSON.stringify({ username, password })
   });
-  if (r.ok) { document.getElementById('loginError').textContent = ''; showApp(); }
-  else { document.getElementById('loginError').textContent = 'Wrong password.'; }
+  const data = await r.json();
+  if (r.ok) { document.getElementById('loginError').textContent = ''; showApp(data.username); }
+  else { document.getElementById('loginError').textContent = data.error || 'Login failed.'; }
+}
+
+document.getElementById('registerBtn').onclick = doRegister;
+
+async function doRegister(){
+  const username = document.getElementById('regUsername').value.trim();
+  const password = document.getElementById('regPassword').value;
+  const inviteCode = document.getElementById('regInviteCode').value;
+  const r = await fetch('/admin/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password, inviteCode })
+  });
+  const data = await r.json();
+  if (r.ok) { document.getElementById('loginError').textContent = ''; showApp(data.username); }
+  else { document.getElementById('loginError').textContent = data.error || 'Registration failed.'; }
 }
 
 document.getElementById('logoutBtn').onclick = async () => {
@@ -988,13 +1129,14 @@ document.getElementById('roomsBtn').onclick = () => {
 
 document.getElementById('createRoomBtn').onclick = async () => {
   const roomName = document.getElementById('newRoomName').value.trim();
+  const idPrefix = document.getElementById('newRoomIdPrefix').value.trim();
   if (!roomName) return;
   const r = await fetch('/admin/rooms', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ roomName, studentIds: [] })
+    body: JSON.stringify({ roomName, studentIds: [], idPrefix })
   });
-  if (r.ok) { document.getElementById('newRoomName').value = ''; loadRooms(); }
+  if (r.ok) { document.getElementById('newRoomName').value = ''; document.getElementById('newRoomIdPrefix').value = ''; loadRooms(); }
   else { const d = await r.json(); alert(d.error || 'failed'); }
 };
 
@@ -1007,7 +1149,8 @@ async function loadRooms(){
     box.style.cssText = 'background:#1c1f26;border-radius:6px;padding:10px;margin-bottom:10px';
     box.innerHTML =
       '<div style="font-weight:bold;margin-bottom:4px">' + room.roomName +
-      '<span class="badge">' + room.studentIds.length + ' ids</span></div>' +
+      '<span class="badge">' + room.studentIds.length + ' ids</span>' +
+      (room.idPrefix ? '<span class="badge">prefix ' + room.idPrefix + '</span>' : '') + '</div>' +
       '<textarea rows="3" placeholder="paste student IDs, one per line or comma separated" style="width:100%;box-sizing:border-box;background:#12141a;color:#e6e6e6;border:1px solid #2a2d34;border-radius:6px;padding:6px;font-size:12px"></textarea>' +
       '<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">' +
       '<button class="addIdsBtn">Add IDs</button>' +
@@ -1019,11 +1162,15 @@ async function loadRooms(){
       const ta = box.querySelector('textarea');
       const studentIds = ta.value;
       if (!studentIds.trim()) return;
-      await fetch('/admin/rooms/' + encodeURIComponent(room.roomName) + '/students', {
+      const r = await fetch('/admin/rooms/' + encodeURIComponent(room.roomName) + '/students', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ studentIds })
       });
+      const data = await r.json();
+      if (data.rejected) {
+        alert('Added ' + data.added + ', rejected ' + data.rejected + ' (dept prefix mismatch): ' + data.rejectedIds.join(', '));
+      }
       loadRooms();
     };
     box.querySelector('.delDataBtn').onclick = async () => {
@@ -1093,7 +1240,7 @@ async function loadDetail(studentId, sessionId){
 
 function escapeHtml(s){ return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
-fetch('/api/students').then(r => { if (r.ok) showApp(); }).catch(() => {});
+fetch('/admin/me').then(async (r) => { if (r.ok) { const d = await r.json(); showApp(d.username); } }).catch(() => {});
 </script>
 </body></html>`;
 
@@ -1101,7 +1248,7 @@ connectDb()
   .then(() => {
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`Collector server listening on :${PORT}`);
-      console.log(`Admin panel: http://localhost:${PORT}/admin  (login with the ADMIN_KEY password)`);
+      console.log(`Admin panel: http://localhost:${PORT}/admin  (register a teacher account with your INVITE_CODE)`);
     });
   })
   .catch((err) => {
