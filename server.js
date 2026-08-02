@@ -245,16 +245,19 @@ function startSession(res, username) {
 app.post('/admin/register', async (req, res) => {
   const { username, password, inviteCode } = req.body || {};
   if (inviteCode !== INVITE_CODE) return res.status(403).json({ error: 'wrong invite code' });
-  const uname = (username || '').toString().trim();
+  const uname = (username || '').toString().trim().toLowerCase();
   const pass = (password || '').toString();
-  if (!uname || pass.length < 6) {
-    return res.status(400).json({ error: 'username required, password must be 6+ characters' });
+  if (!/^[a-z0-9._%+-]+@gmail\.com$/.test(uname)) {
+    return res.status(400).json({ error: 'a valid @gmail.com address is required' });
+  }
+  if (pass.length < 6) {
+    return res.status(400).json({ error: 'password must be 6+ characters' });
   }
   const passwordHash = await bcrypt.hash(pass, 10);
   try {
     await adminsCol.insertOne({ username: uname, passwordHash, createdAt: Date.now() });
   } catch (err) {
-    if (err.code === 11000) return res.status(409).json({ error: 'username already taken' });
+    if (err.code === 11000) return res.status(409).json({ error: 'an account with this Gmail already exists' });
     throw err;
   }
   startSession(res, uname);
@@ -871,7 +874,7 @@ button:hover{background:var(--navy-light)}
   <div id="loginError"></div>
 
   <div id="loginForm">
-    <input id="loginUsername" placeholder="Username" autofocus />
+    <input id="loginUsername" type="email" placeholder="Gmail address" autofocus />
     <div style="position:relative;width:270px">
       <input id="loginPassword" type="password" placeholder="Password" style="width:100%;padding-right:40px" />
       <span class="togglePassword" data-target="loginPassword" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;color:#6b7280;font-size:16px;user-select:none">&#128065;</span>
@@ -880,13 +883,13 @@ button:hover{background:var(--navy-light)}
   </div>
 
   <div id="registerForm" style="display:none">
-    <input id="regUsername" placeholder="Choose a username" />
+    <input id="regInviteCode" placeholder="Invite code (ask your admin)" />
+    <input id="regUsername" type="email" placeholder="Gmail address" disabled />
     <div style="position:relative;width:270px">
-      <input id="regPassword" type="password" placeholder="Choose a password (6+ chars)" style="width:100%;padding-right:40px" />
+      <input id="regPassword" type="password" placeholder="Choose a password (6+ chars)" style="width:100%;padding-right:40px" disabled />
       <span class="togglePassword" data-target="regPassword" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;color:#6b7280;font-size:16px;user-select:none">&#128065;</span>
     </div>
-    <input id="regInviteCode" placeholder="Invite code (ask your admin)" />
-    <button id="registerBtn">Create Account</button>
+    <button id="registerBtn" disabled>Create Account</button>
   </div>
 </div>
 <header>
@@ -1087,6 +1090,13 @@ async function doLogin(){
   if (r.ok) { document.getElementById('loginError').textContent = ''; showApp(data.username); }
   else { document.getElementById('loginError').textContent = data.error || 'Login failed.'; }
 }
+
+document.getElementById('regInviteCode').addEventListener('input', (e) => {
+  const unlocked = e.target.value.trim().length > 0;
+  document.getElementById('regUsername').disabled = !unlocked;
+  document.getElementById('regPassword').disabled = !unlocked;
+  document.getElementById('registerBtn').disabled = !unlocked;
+});
 
 document.getElementById('registerBtn').onclick = doRegister;
 
