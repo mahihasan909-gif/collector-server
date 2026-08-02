@@ -396,6 +396,16 @@ app.post('/admin/rooms', checkAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
+// One-time migration helper: attach a legacy ownerless room (from before multi-admin accounts
+// existed) to whichever teacher account claims it first.
+app.post('/admin/rooms/:roomName/claim', checkAdmin, async (req, res) => {
+  const room = await roomsCol.findOne({ roomName: req.params.roomName });
+  if (!room) return res.status(404).json({ error: 'room not found' });
+  if (room.ownerAdmin) return res.status(409).json({ error: 'room already has an owner' });
+  await roomsCol.updateOne({ roomName: req.params.roomName }, { $set: { ownerAdmin: req.adminUsername } });
+  res.json({ ok: true });
+});
+
 async function assertOwnsRoom(req, res, roomName) {
   const room = await roomsCol.findOne({ roomName });
   if (!room || room.ownerAdmin !== req.adminUsername) {
