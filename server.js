@@ -847,12 +847,20 @@ button:hover{background:var(--navy-light)}
 .session-row{display:flex;align-items:center;justify-content:space-between}
 .session-row .dl{font-size:11px;color:var(--navy-light);text-decoration:none;margin-left:6px;font-weight:600}
 #loginScreen{position:fixed;inset:0;background:linear-gradient(160deg,var(--navy-dark),var(--navy) 60%);display:flex;align-items:center;justify-content:center;flex-direction:column;z-index:10}
-#loginScreen img{height:70px;margin-bottom:18px}
-#loginScreen h1{font-size:18px;margin-bottom:18px;color:#fff;font-weight:600}
-#loginScreen input{padding:11px;width:270px;background:rgba(255,255,255,.95);border:1px solid transparent;color:var(--text);border-radius:8px;margin-bottom:12px;font-size:14px}
-#loginScreen button{width:270px;padding:11px;background:#fff;color:var(--navy)}
-#loginScreen button:hover{background:#e3e9fb}
-#loginError{color:#ffb4b4;font-size:12px;height:16px;margin-bottom:6px}
+#loginScreen img{height:64px;margin-bottom:16px}
+#loginCard{background:#fff;border-radius:16px;padding:36px 32px;width:340px;box-sizing:border-box;box-shadow:0 20px 60px rgba(0,0,0,.35);text-align:center}
+#loginCard h1{font-size:17px;margin:0 0 22px;color:var(--navy);font-weight:700}
+#loginTabs{display:flex;gap:0;margin-bottom:20px;border-radius:8px;overflow:hidden;border:1px solid var(--border)}
+#loginTabs div{flex:1;text-align:center;padding:9px;cursor:pointer;font-size:13px;font-weight:600;color:var(--muted);background:#f7f9fd;transition:background .15s,color .15s}
+#loginTabs div.activeTab{background:var(--navy);color:#fff}
+#loginForm, #registerForm{display:flex;flex-direction:column;gap:12px;text-align:left}
+#loginScreen input{display:block;width:100%;box-sizing:border-box;padding:11px 12px;background:#f7f9fd;border:1px solid var(--border);color:var(--text);border-radius:8px;font-size:14px}
+#loginScreen input:focus{outline:2px solid var(--navy-light);border-color:transparent}
+#loginScreen input:disabled{background:#eef1f8;color:var(--muted);cursor:not-allowed}
+#loginScreen button{width:100%;padding:12px;background:var(--navy);color:#fff;font-weight:700;margin-top:4px}
+#loginScreen button:hover{background:var(--navy-light)}
+#loginScreen button:disabled{background:#c7cede;cursor:not-allowed}
+#loginError{color:#c0392b;font-size:12px;min-height:16px;margin-bottom:4px;text-align:left}
 #app{display:none}
 #aiFab{position:fixed;right:26px;bottom:26px;width:58px;height:58px;border-radius:50%;background:linear-gradient(135deg,var(--navy),var(--navy-light));border:none;color:#fff;font-size:24px;cursor:pointer;box-shadow:0 6px 18px rgba(27,42,87,.4);z-index:20}
 #aiFab:hover{filter:brightness(1.15)}
@@ -866,30 +874,32 @@ button:hover{background:var(--navy-light)}
 <body>
 <div id="loginScreen">
   <img src="/assets/ewu-logo.png" alt="East West University" />
-  <h1>Student Tracker &mdash; Teacher Portal</h1>
-  <div style="display:flex;gap:0;margin-bottom:14px;width:270px;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,.3)">
-    <div id="tabLogin" style="flex:1;text-align:center;padding:8px;cursor:pointer;background:rgba(255,255,255,.9);color:var(--navy);font-size:13px;font-weight:600">Login</div>
-    <div id="tabRegister" style="flex:1;text-align:center;padding:8px;cursor:pointer;color:#fff;font-size:13px;font-weight:600">Register</div>
-  </div>
-  <div id="loginError"></div>
-
-  <div id="loginForm">
-    <input id="loginUsername" type="email" placeholder="Gmail address" autofocus />
-    <div style="position:relative;width:270px">
-      <input id="loginPassword" type="password" placeholder="Password" style="width:100%;padding-right:40px" />
-      <span class="togglePassword" data-target="loginPassword" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;color:#6b7280;font-size:16px;user-select:none">&#128065;</span>
+  <div id="loginCard">
+    <h1>Student Tracker &mdash; Teacher Portal</h1>
+    <div id="loginTabs">
+      <div id="tabLogin" class="activeTab">Login</div>
+      <div id="tabRegister">Register</div>
     </div>
-    <button id="loginBtn">Login</button>
-  </div>
+    <div id="loginError"></div>
 
-  <div id="registerForm" style="display:none">
-    <input id="regInviteCode" placeholder="Invite code (ask your admin)" />
-    <input id="regUsername" type="email" placeholder="Gmail address" disabled />
-    <div style="position:relative;width:270px">
-      <input id="regPassword" type="password" placeholder="Choose a password (6+ chars)" style="width:100%;padding-right:40px" disabled />
-      <span class="togglePassword" data-target="regPassword" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;color:#6b7280;font-size:16px;user-select:none">&#128065;</span>
+    <div id="loginForm">
+      <input id="loginUsername" type="email" placeholder="Gmail address" autofocus />
+      <div style="position:relative">
+        <input id="loginPassword" type="password" placeholder="Password" style="padding-right:40px" />
+        <span class="togglePassword" data-target="loginPassword" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;color:#6b7280;font-size:16px;user-select:none">&#128065;</span>
+      </div>
+      <button id="loginBtn">Login</button>
     </div>
-    <button id="registerBtn" disabled>Create Account</button>
+
+    <div id="registerForm" style="display:none">
+      <input id="regInviteCode" placeholder="Invite code (ask your admin)" />
+      <input id="regUsername" type="email" placeholder="Gmail address" disabled />
+      <div style="position:relative">
+        <input id="regPassword" type="password" placeholder="Choose a password (6+ chars)" style="padding-right:40px" disabled />
+        <span class="togglePassword" data-target="regPassword" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;color:#6b7280;font-size:16px;user-select:none">&#128065;</span>
+      </div>
+      <button id="registerBtn" disabled>Create Account</button>
+    </div>
   </div>
 </div>
 <header>
@@ -1066,12 +1076,10 @@ document.getElementById('tabLogin').onclick = () => switchTab('login');
 document.getElementById('tabRegister').onclick = () => switchTab('register');
 function switchTab(which){
   const isLogin = which === 'login';
-  document.getElementById('loginForm').style.display = isLogin ? 'block' : 'none';
-  document.getElementById('registerForm').style.display = isLogin ? 'none' : 'block';
-  document.getElementById('tabLogin').style.background = isLogin ? 'rgba(255,255,255,.9)' : 'transparent';
-  document.getElementById('tabLogin').style.color = isLogin ? 'var(--navy)' : '#fff';
-  document.getElementById('tabRegister').style.background = isLogin ? 'transparent' : 'rgba(255,255,255,.9)';
-  document.getElementById('tabRegister').style.color = isLogin ? '#fff' : 'var(--navy)';
+  document.getElementById('loginForm').style.display = isLogin ? 'flex' : 'none';
+  document.getElementById('registerForm').style.display = isLogin ? 'none' : 'flex';
+  document.getElementById('tabLogin').classList.toggle('activeTab', isLogin);
+  document.getElementById('tabRegister').classList.toggle('activeTab', !isLogin);
   document.getElementById('loginError').textContent = '';
 }
 
