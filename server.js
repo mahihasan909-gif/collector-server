@@ -9,7 +9,7 @@ const ADMIN_KEY = process.env.ADMIN_KEY || '';
 const ALLOWED_DEPT = process.env.ALLOWED_DEPT_CODE || '60'; // e.g. 60 = CSE; empty = allow all
 const MONGODB_URI = process.env.MONGODB_URI || '';
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
-const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free';
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'openai/gpt-oss-20b:free';
 
 if (!API_KEY || !ADMIN_KEY) {
   console.error(
