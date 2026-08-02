@@ -445,13 +445,19 @@ button{background:#2b3a55;color:#e6e6e6;border:1px solid #3a4a6b;border-radius:6
 button:hover{background:#35476b}
 #result{margin-top:20px;padding:14px;background:#1c1f26;border-radius:6px;white-space:pre-wrap;font-size:14px;line-height:1.5;display:none}
 #status{font-size:12px;color:#8a8f98;margin-bottom:10px;min-height:16px}
-#chat{margin-top:28px;display:none}
-#chatLog{background:#1c1f26;border-radius:6px;padding:10px;min-height:80px;max-height:300px;overflow-y:auto;font-size:13px;margin-bottom:8px}
+#chatLog{background:#12141a;border-radius:6px;padding:10px;min-height:80px;max-height:300px;overflow-y:auto;font-size:13px;margin-bottom:8px}
 .msg{margin-bottom:10px}
 .msg.me{color:#8fb8ff}
 .msg.ai{color:#e6e6e6}
 #chatRow{display:flex;gap:8px}
 #chatInput{flex:1;margin-bottom:0}
+#aiFab{position:fixed;right:24px;bottom:24px;width:56px;height:56px;border-radius:50%;background:linear-gradient(135deg,#6a5cff,#3aa0ff);border:none;color:#fff;font-size:22px;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:20}
+#aiFab:hover{filter:brightness(1.1)}
+#aiModalOverlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:21;align-items:center;justify-content:center}
+#aiModal{background:#1c1f26;border:1px solid #2a2d34;border-radius:10px;padding:18px;width:480px;max-width:90vw;max-height:80vh;overflow-y:auto;box-sizing:border-box}
+#aiModal h2{margin:0 0 6px;font-size:15px}
+#aiModalClose{float:right;cursor:pointer;color:#8a8f98;font-size:16px}
+#aiHint{font-size:12px;color:#8a8f98;margin-bottom:10px}
 </style></head>
 <body><div class="wrap">
 <h1>Student Tracker &mdash; My Result</h1>
@@ -459,19 +465,34 @@ button:hover{background:#35476b}
 <input id="studentId" placeholder="Your student ID (e.g. 2023-1-60-053)" />
 <button id="loadBtn">View My Result</button>
 <div id="result"></div>
+</div>
 
-<div id="chat">
-  <h1>Need advice? Ask the AI helper</h1>
-  <div id="status2" style="font-size:12px;color:#8a8f98;margin-bottom:8px">Hints only &mdash; it will not write code for you.</div>
-  <div id="chatLog"></div>
-  <div id="chatRow">
-    <input id="chatInput" placeholder="e.g. Why is my loop running forever?" />
-    <button id="chatBtn">Ask</button>
+<button id="aiFab" title="Ask the AI helper">&#10024;</button>
+<div id="aiModalOverlay">
+  <div id="aiModal">
+    <span id="aiModalClose">&times;</span>
+    <h2>Ask the AI helper</h2>
+    <div id="aiHint">Hints only &mdash; it will not write code for you.</div>
+    <div id="chatLog"></div>
+    <div id="chatRow">
+      <input id="chatInput" placeholder="e.g. Why is my loop running forever?" />
+      <button id="chatBtn">Ask</button>
+    </div>
   </div>
 </div>
-</div>
+
 <script>
 let sid = '';
+
+document.getElementById('aiFab').onclick = () => {
+  document.getElementById('aiModalOverlay').style.display = 'flex';
+};
+document.getElementById('aiModalClose').onclick = () => {
+  document.getElementById('aiModalOverlay').style.display = 'none';
+};
+document.getElementById('aiModalOverlay').addEventListener('click', (e) => {
+  if (e.target.id === 'aiModalOverlay') document.getElementById('aiModalOverlay').style.display = 'none';
+});
 
 document.getElementById('loadBtn').onclick = loadResult;
 document.getElementById('studentId').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadResult(); });
@@ -495,7 +516,6 @@ async function loadResult(){
     resultEl.style.display = 'block';
     resultEl.textContent = data.feedback;
   }
-  document.getElementById('chat').style.display = 'block';
 }
 
 document.getElementById('chatBtn').onclick = sendChat;
@@ -504,7 +524,8 @@ document.getElementById('chatInput').addEventListener('keydown', (e) => { if (e.
 async function sendChat(){
   const input = document.getElementById('chatInput');
   const q = input.value.trim();
-  if (!q || !sid) return;
+  if (!q) return;
+  if (!sid) { alert('Enter your student ID in the box above first, then open this AI helper again.'); return; }
   const log = document.getElementById('chatLog');
   log.innerHTML += '<div class="msg me"><b>You:</b> ' + escapeHtml(q) + '</div>';
   input.value = '';
@@ -552,6 +573,13 @@ button:hover{background:#35476b}
 #loginScreen button{width:260px;padding:10px}
 #loginError{color:#ff6b6b;font-size:12px;height:16px;margin-bottom:6px}
 #app{display:none}
+#aiFab{position:fixed;right:24px;bottom:24px;width:56px;height:56px;border-radius:50%;background:linear-gradient(135deg,#6a5cff,#3aa0ff);border:none;color:#fff;font-size:22px;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:20}
+#aiFab:hover{filter:brightness(1.1)}
+#aiModalOverlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:21;align-items:center;justify-content:center}
+#aiModal{background:#1c1f26;border:1px solid #2a2d34;border-radius:10px;padding:18px;width:520px;max-width:90vw;max-height:80vh;overflow-y:auto}
+#aiModal h2{margin:0 0 10px;font-size:15px}
+#aiModal select{width:100%;padding:8px;background:#12141a;border:1px solid #2a2d34;color:#e6e6e6;border-radius:6px;margin-bottom:10px}
+#aiModalClose{float:right;cursor:pointer;color:#8a8f98;font-size:16px}
 </style></head>
 <body>
 <div id="loginScreen">
@@ -576,30 +604,66 @@ button:hover{background:#35476b}
   <div id="roomList" style="margin-top:12px"></div>
 </div>
 <div class="col" id="detail">
-  <h2>Feedback &amp; Result</h2>
-  <div id="feedbackBox" style="display:none;margin-bottom:16px;padding:10px;background:#1c1f26;border-radius:6px">
-    <div id="feedbackStudentLabel" style="font-size:12px;color:#8a8f98;margin-bottom:6px"></div>
-    <button id="aiGenBtn">Generate AI Feedback</button>
-    <span id="aiGenStatus" style="font-size:11px;color:#8a8f98;margin-left:8px"></span>
-    <textarea id="feedbackText" rows="8" style="width:100%;box-sizing:border-box;background:#12141a;color:#e6e6e6;border:1px solid #2a2d34;border-radius:6px;padding:8px;font-size:13px;margin-top:8px"></textarea>
-    <div style="margin-top:8px">
-      <button id="saveDraftBtn">Save (Draft)</button>
-      <button id="publishBtn">Publish to Student</button>
-      <button id="unpublishBtn">Unpublish</button>
-      <span id="publishStatus" style="font-size:11px;color:#8a8f98;margin-left:8px"></span>
-    </div>
-  </div>
   <h2>Session Detail</h2>
   <div id="detailBody">Select a student &rarr; session.</div>
 </div>
 </div>
+
+<button id="aiFab" title="AI Feedback Assistant">&#10024;</button>
+<div id="aiModalOverlay">
+  <div id="aiModal">
+    <span id="aiModalClose">&times;</span>
+    <h2>AI Feedback Assistant</h2>
+    <select id="aiStudentSelect"><option value="">Select a student...</option></select>
+    <div id="aiModalBody" style="display:none">
+      <button id="aiGenBtn">Generate AI Feedback</button>
+      <span id="aiGenStatus" style="font-size:11px;color:#8a8f98;margin-left:8px"></span>
+      <textarea id="feedbackText" rows="8" style="width:100%;box-sizing:border-box;background:#12141a;color:#e6e6e6;border:1px solid #2a2d34;border-radius:6px;padding:8px;font-size:13px;margin-top:8px"></textarea>
+      <div style="margin-top:8px">
+        <button id="saveDraftBtn">Save (Draft)</button>
+        <button id="publishBtn">Publish to Student</button>
+        <button id="unpublishBtn">Unpublish</button>
+        <span id="publishStatus" style="font-size:11px;color:#8a8f98;margin-left:8px"></span>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 let currentFeedbackStudentId = '';
+let allStudentIds = [];
+
+document.getElementById('aiFab').onclick = () => {
+  document.getElementById('aiModalOverlay').style.display = 'flex';
+  populateAiStudentSelect();
+  if (currentFeedbackStudentId) loadFeedback(currentFeedbackStudentId);
+};
+document.getElementById('aiModalClose').onclick = () => {
+  document.getElementById('aiModalOverlay').style.display = 'none';
+};
+document.getElementById('aiModalOverlay').addEventListener('click', (e) => {
+  if (e.target.id === 'aiModalOverlay') document.getElementById('aiModalOverlay').style.display = 'none';
+});
+
+function populateAiStudentSelect(){
+  const sel = document.getElementById('aiStudentSelect');
+  sel.innerHTML = '<option value="">Select a student...</option>';
+  allStudentIds.forEach((id) => {
+    const opt = document.createElement('option');
+    opt.value = id; opt.textContent = id;
+    if (id === currentFeedbackStudentId) opt.selected = true;
+    sel.appendChild(opt);
+  });
+}
+
+document.getElementById('aiStudentSelect').onchange = (e) => {
+  if (e.target.value) loadFeedback(e.target.value);
+  else document.getElementById('aiModalBody').style.display = 'none';
+};
 
 async function loadFeedback(studentId){
   currentFeedbackStudentId = studentId;
-  document.getElementById('feedbackBox').style.display = 'block';
-  document.getElementById('feedbackStudentLabel').textContent = studentId;
+  document.getElementById('aiModalBody').style.display = 'block';
   document.getElementById('aiGenStatus').textContent = '';
   document.getElementById('publishStatus').textContent = '';
   const doc = await j('/admin/result/' + encodeURIComponent(studentId));
@@ -672,6 +736,7 @@ async function loadStudents(){
   const dept = document.getElementById('deptFilter').value.trim();
   const url = '/api/students?dept=' + encodeURIComponent(dept);
   const students = await j(url);
+  allStudentIds = students.map((s) => s.studentId);
   const el = document.getElementById('studentList');
   el.innerHTML = '';
   students.forEach(s => {
@@ -680,7 +745,7 @@ async function loadStudents(){
     d.textContent = s.studentId;
     d.innerHTML += '<span class="badge">dept ' + (s.deptCode || '?') + '</span>';
     d.innerHTML += '<span class="badge">' + s.sessionCount + '</span>';
-    d.onclick = () => { document.querySelectorAll('#studentList .item').forEach(x=>x.classList.remove('active')); d.classList.add('active'); loadSessions(s.studentId); loadFeedback(s.studentId); };
+    d.onclick = () => { document.querySelectorAll('#studentList .item').forEach(x=>x.classList.remove('active')); d.classList.add('active'); loadSessions(s.studentId); currentFeedbackStudentId = s.studentId; };
     el.appendChild(d);
   });
 }
