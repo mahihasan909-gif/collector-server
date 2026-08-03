@@ -62,12 +62,22 @@ async function connectDb() {
   console.log('Connected to MongoDB.');
 }
 
-// Every studentId in any room owned by this admin — used to scope all admin data queries.
+// Rooms created before multi-admin accounts existed have no owner — treated as shared
+// legacy data visible to every admin (see "Old Rooms" panel).
+const OWNERLESS = { $or: [{ ownerAdmin: { $exists: false } }, { ownerAdmin: '' }, { ownerAdmin: null }] };
+
+// Every studentId in any room owned by this admin — used to scope the private Students list.
 async function ownedStudentIds(adminUsername) {
   const rooms = await roomsCol.find({ ownerAdmin: adminUsername }).toArray();
   const ids = new Set();
   for (const r of rooms) for (const id of r.studentIds || []) ids.add(id);
   return ids;
+}
+
+// True if studentId belongs to an ownerless legacy room (shared "Old Rooms" data).
+async function isInOldRoom(studentId) {
+  const room = await roomsCol.findOne({ studentIds: studentId, ...OWNERLESS });
+  return Boolean(room);
 }
 
 async function isStudentAllowed(studentId) {
@@ -301,7 +311,7 @@ app.get('/api/students', checkAdmin, async (req, res) => {
 
 async function assertOwnsStudent(req, res, studentId) {
   const owned = await ownedStudentIds(req.adminUsername);
-  if (!owned.has(studentId)) {
+  if (!owned.has(studentId) && !(await isInOldRoom(studentId))) {
     res.status(403).json({ error: 'not your student' });
     return false;
   }
@@ -373,10 +383,56 @@ app.get('/api/download-all', checkAdmin, async (req, res) => {
 // --- rooms: whitelist of student IDs allowed to use extension + student panel, owned by one admin ---
 
 app.get('/admin/rooms', checkAdmin, async (req, res) => {
-  const rooms = await roomsCol
-    .find({ $or: [{ ownerAdmin: req.adminUsername }, { ownerAdmin: { $exists: false } }, { ownerAdmin: '' }] })
-    .toArray();
+  const rooms = await roomsCol.find({ ownerAdmin: req.adminUsername }).toArray();
   res.json(rooms.map((r) => ({ roomName: r.roomName, studentIds: r.studentIds || [], createdAt: r.createdAt })));
+});
+
+// Old rooms: created before multi-admin accounts existed, have no owner. Shared/visible to
+// every admin (legacy data), separate from each admin's private Manage Rooms list.
+app.get('/admin/old-rooms', checkAdmin, async (req, res) => {
+  const rooms = await roomsCol.find(OWNERLESS).toArray();
+  res.json(rooms.map((r) => ({ roomName: r.roomName, studentIds: r.studentIds || [], createdAt: r.createdAt })));
+});
+
+async function assertOldRoom(req, res, roomName) {
+  const room = await roomsCol.findOne({ roomName, ...OWNERLESS });
+  if (!room) {
+    res.status(404).json({ error: 'room not found' });
+    return null;
+  }
+  return room;
+}
+
+app.post('/admin/old-rooms/:roomName/students', checkAdmin, async (req, res) => {
+  const room = await assertOldRoom(req, res, req.params.roomName);
+  if (!room) return;
+  const ids = parseIdList(req.body?.studentIds);
+  if (!ids.length) return res.status(400).json({ error: 'studentIds required' });
+  await roomsCol.updateOne({ _id: room._id }, { $addToSet: { studentIds: { $each: ids } } });
+  res.json({ ok: true, added: ids.length });
+});
+
+app.delete('/admin/old-rooms/:roomName/students/:studentId', checkAdmin, async (req, res) => {
+  const room = await assertOldRoom(req, res, req.params.roomName);
+  if (!room) return;
+  await roomsCol.updateOne({ _id: room._id }, { $pull: { studentIds: req.params.studentId } });
+  res.json({ ok: true });
+});
+
+app.delete('/admin/old-rooms/:roomName', checkAdmin, async (req, res) => {
+  const room = await assertOldRoom(req, res, req.params.roomName);
+  if (!room) return;
+  await roomsCol.deleteOne({ _id: room._id });
+  res.json({ ok: true });
+});
+
+app.delete('/admin/old-rooms/:roomName/data', checkAdmin, async (req, res) => {
+  const room = await assertOldRoom(req, res, req.params.roomName);
+  if (!room) return;
+  const ids = room.studentIds || [];
+  const sessRes = await sessionsCol.deleteMany({ studentId: { $in: ids } });
+  const resRes = await resultsCol.deleteMany({ studentId: { $in: ids } });
+  res.json({ ok: true, deletedSessions: sessRes.deletedCount, deletedResults: resRes.deletedCount });
 });
 
 app.post('/admin/rooms', checkAdmin, async (req, res) => {
@@ -403,10 +459,7 @@ app.post('/admin/rooms/:roomName/claim', checkAdmin, async (req, res) => {
 });
 
 async function assertOwnsRoom(req, res, roomName) {
-  const room = await roomsCol.findOne({
-    roomName,
-    $or: [{ ownerAdmin: req.adminUsername }, { ownerAdmin: { $exists: false } }, { ownerAdmin: '' }]
-  });
+  const room = await roomsCol.findOne({ roomName, ownerAdmin: req.adminUsername });
   if (!room) {
     res.status(404).json({ error: 'room not found' });
     return null;
@@ -932,6 +985,7 @@ button:hover{background:var(--navy-light)}
 <div class="col" id="students"><h2>Students</h2>
   <button id="downloadAllBtn">Download All (CSV)</button>
   <button id="roomsBtn">Manage Rooms</button>
+  <button id="oldRoomsBtn">Old Rooms</button>
   <div id="studentList"></div>
 </div>
 <div class="col" id="sessions"><h2>Sessions</h2>
@@ -943,6 +997,10 @@ button:hover{background:var(--navy-light)}
   <input id="newRoomName" placeholder="Room name e.g. cse103" />
   <button id="createRoomBtn">Create Room</button>
   <div id="roomList" style="margin-top:12px"></div>
+</div>
+<div class="col" id="oldRoomsPanel" style="display:none;width:340px;border-right:1px solid var(--border)">
+  <h2>Old Rooms (created before, shared)</h2>
+  <div id="oldRoomList" style="margin-top:12px"></div>
 </div>
 <div class="col" id="detail">
   <h2>Session Detail</h2>
@@ -1166,9 +1224,17 @@ document.getElementById('downloadAllBtn').onclick = () => {
 };
 
 document.getElementById('roomsBtn').onclick = () => {
+  document.getElementById('oldRoomsPanel').style.display = 'none';
   const el = document.getElementById('roomsPanel');
   el.style.display = el.style.display === 'none' ? 'block' : 'none';
   if (el.style.display === 'block') loadRooms();
+};
+
+document.getElementById('oldRoomsBtn').onclick = () => {
+  document.getElementById('roomsPanel').style.display = 'none';
+  const el = document.getElementById('oldRoomsPanel');
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+  if (el.style.display === 'block') loadOldRooms();
 };
 
 document.getElementById('createRoomBtn').onclick = async () => {
@@ -1183,15 +1249,14 @@ document.getElementById('createRoomBtn').onclick = async () => {
   else { const d = await r.json(); alert(d.error || 'failed'); }
 };
 
-async function loadRooms(){
-  const rooms = await j('/admin/rooms');
-  const el = document.getElementById('roomList');
+function renderRoomList(rooms, listElId, apiBase, reload) {
+  const el = document.getElementById(listElId);
   el.innerHTML = '';
   rooms.forEach(room => {
     const box = document.createElement('div');
     box.style.cssText = 'background:#1c1f26;border-radius:6px;padding:10px;margin-bottom:10px';
     box.innerHTML =
-      '<div style="font-weight:bold;margin-bottom:4px">' + room.roomName +
+      '<div style="font-weight:bold;margin-bottom:4px;color:#e6e6e6">' + room.roomName +
       '<span class="badge">' + room.studentIds.length + ' ids</span></div>' +
       '<textarea rows="3" placeholder="paste student IDs, one per line or comma separated" style="width:100%;box-sizing:border-box;background:#12141a;color:#e6e6e6;border:1px solid #2a2d34;border-radius:6px;padding:6px;font-size:12px"></textarea>' +
       '<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">' +
@@ -1199,32 +1264,54 @@ async function loadRooms(){
       '<button class="delDataBtn" style="background:#5a2b2b">Delete Room Data</button>' +
       '<button class="delRoomBtn" style="background:#5a2b2b">Delete Room</button>' +
       '</div>' +
-      '<div style="margin-top:6px;font-size:11px;color:#8a8f98">' + room.studentIds.join(', ') + '</div>';
+      '<div class="roomIdList" style="margin-top:6px;font-size:11px;color:#8a8f98;display:flex;flex-wrap:wrap;gap:4px"></div>';
+    const idListEl = box.querySelector('.roomIdList');
+    room.studentIds.forEach((sid) => {
+      const chip = document.createElement('span');
+      chip.textContent = sid;
+      chip.style.cssText = 'cursor:pointer;text-decoration:underline;padding:2px 4px';
+      chip.onclick = () => {
+        document.querySelectorAll('#studentList .item').forEach(x=>x.classList.remove('active'));
+        loadSessions(sid);
+        currentFeedbackStudentId = sid;
+      };
+      idListEl.appendChild(chip);
+    });
     box.querySelector('.addIdsBtn').onclick = async () => {
       const ta = box.querySelector('textarea');
       const studentIds = ta.value;
       if (!studentIds.trim()) return;
-      const r = await fetch('/admin/rooms/' + encodeURIComponent(room.roomName) + '/students', {
+      await fetch(apiBase + encodeURIComponent(room.roomName) + '/students', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ studentIds })
       });
-      loadRooms();
+      reload();
     };
     box.querySelector('.delDataBtn').onclick = async () => {
       if (!confirm('Delete ALL collected session/result data for every student in room "' + room.roomName + '"? This cannot be undone. The roster (allowed IDs) stays.')) return;
-      const r = await fetch('/admin/rooms/' + encodeURIComponent(room.roomName) + '/data', { method: 'DELETE' });
+      const r = await fetch(apiBase + encodeURIComponent(room.roomName) + '/data', { method: 'DELETE' });
       const d = await r.json();
       alert('Deleted ' + d.deletedSessions + ' sessions, ' + d.deletedResults + ' results.');
       loadStudents();
     };
     box.querySelector('.delRoomBtn').onclick = async () => {
       if (!confirm('Delete room "' + room.roomName + '"? Students in it will lose access to the extension and student panel. Their already-collected data is NOT deleted.')) return;
-      await fetch('/admin/rooms/' + encodeURIComponent(room.roomName), { method: 'DELETE' });
-      loadRooms();
+      await fetch(apiBase + encodeURIComponent(room.roomName), { method: 'DELETE' });
+      reload();
     };
     el.appendChild(box);
   });
+}
+
+async function loadRooms(){
+  const rooms = await j('/admin/rooms');
+  renderRoomList(rooms, 'roomList', '/admin/rooms/', loadRooms);
+}
+
+async function loadOldRooms(){
+  const rooms = await j('/admin/old-rooms');
+  renderRoomList(rooms, 'oldRoomList', '/admin/old-rooms/', loadOldRooms);
 }
 
 async function loadSessions(studentId){
