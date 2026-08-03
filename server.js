@@ -998,7 +998,7 @@ button:hover{background:var(--navy-light)}
     <div id="loginError"></div>
 
     <div id="loginForm">
-      <input id="loginUsername" type="email" placeholder="Gmail address" autofocus />
+      <input id="loginUsername" type="email" placeholder="Username (Gmail address)" autofocus />
       <div style="position:relative">
         <input id="loginPassword" type="password" placeholder="Password" style="padding-right:40px" />
         <span class="togglePassword" data-target="loginPassword" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;color:#6b7280;font-size:16px;user-select:none">&#128065;</span>
@@ -1008,7 +1008,7 @@ button:hover{background:var(--navy-light)}
 
     <div id="registerForm" style="display:none">
       <input id="regInviteCode" placeholder="Invite code (ask your admin)" />
-      <input id="regUsername" type="email" placeholder="Gmail address" disabled />
+      <input id="regUsername" type="email" placeholder="Username (Gmail address)" disabled />
       <div style="position:relative">
         <input id="regPassword" type="password" placeholder="Choose a password (6+ chars)" style="padding-right:40px" disabled />
         <span class="togglePassword" data-target="regPassword" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;color:#6b7280;font-size:16px;user-select:none">&#128065;</span>
