@@ -419,6 +419,15 @@ app.delete('/admin/old-rooms/:roomName/students/:studentId', checkAdmin, async (
   res.json({ ok: true });
 });
 
+// Drop ownership so this room stops showing in the private Students column, but stays
+// visible/manageable under Old Rooms (shared legacy view).
+app.post('/admin/old-rooms/:roomName/unclaim', checkAdmin, async (req, res) => {
+  const room = await roomsCol.findOne({ roomName: req.params.roomName, ownerAdmin: req.adminUsername });
+  if (!room) return res.status(404).json({ error: 'room not found' });
+  await roomsCol.updateOne({ _id: room._id }, { $set: { ownerAdmin: '' } });
+  res.json({ ok: true });
+});
+
 app.delete('/admin/old-rooms/:roomName', checkAdmin, async (req, res) => {
   const room = await assertOldRoom(req, res, req.params.roomName);
   if (!room) return;
@@ -1293,6 +1302,7 @@ async function loadOldRooms(){
       '<button class="dlAllRoomBtn">Download All (this room)</button>' +
       '<button class="delDataBtn" style="background:#5a2b2b">Delete Room Data</button>' +
       '<button class="delRoomBtn" style="background:#5a2b2b">Delete Room</button>' +
+      '<button class="unclaimBtn">Hide from Students List</button>' +
       '</div>' +
       '<div class="roomIdList" style="margin-top:8px;display:flex;flex-direction:column;gap:4px"></div>';
     const idListEl = body.querySelector('.roomIdList');
@@ -1328,6 +1338,11 @@ async function loadOldRooms(){
     };
     body.querySelector('.dlAllRoomBtn').onclick = () => {
       window.location.href = '/admin/old-rooms/' + encodeURIComponent(room.roomName) + '/csv';
+    };
+    body.querySelector('.unclaimBtn').onclick = async () => {
+      await fetch('/admin/old-rooms/' + encodeURIComponent(room.roomName) + '/unclaim', { method: 'POST' });
+      loadOldRooms();
+      loadStudents();
     };
     body.querySelector('.delDataBtn').onclick = async () => {
       if (!confirm('Delete ALL collected session/result data for every student in room "' + room.roomName + '"? This cannot be undone. The roster (allowed IDs) stays.')) return;
