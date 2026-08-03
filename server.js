@@ -382,15 +382,27 @@ app.get('/api/download-all', checkAdmin, async (req, res) => {
 
 // --- rooms: whitelist of student IDs allowed to use extension + student panel, owned by one admin ---
 
+// A room stays "new" (visible under Manage Rooms) for 24h after creation, then moves to
+// the Old Rooms view automatically.
+const RECENT_MS = 24 * 60 * 60 * 1000;
+
 app.get('/admin/rooms', checkAdmin, async (req, res) => {
-  const rooms = await roomsCol.find({ ownerAdmin: req.adminUsername }).toArray();
+  const rooms = await roomsCol
+    .find({ ownerAdmin: req.adminUsername, createdAt: { $gte: Date.now() - RECENT_MS } })
+    .toArray();
   res.json(rooms.map((r) => ({ roomName: r.roomName, studentIds: r.studentIds || [], createdAt: r.createdAt })));
 });
 
-// Old Rooms: full management view — every room this admin owns, plus legacy ownerless
-// rooms from before multi-admin existed. Manage Rooms panel (above) is create-only.
+// Old Rooms: legacy ownerless rooms, plus this admin's own rooms once they age past 24h.
 app.get('/admin/old-rooms', checkAdmin, async (req, res) => {
-  const rooms = await roomsCol.find({ $or: [{ ownerAdmin: req.adminUsername }, OWNERLESS] }).toArray();
+  const rooms = await roomsCol
+    .find({
+      $or: [
+        OWNERLESS,
+        { ownerAdmin: req.adminUsername, createdAt: { $lt: Date.now() - RECENT_MS } }
+      ]
+    })
+    .toArray();
   res.json(rooms.map((r) => ({ roomName: r.roomName, studentIds: r.studentIds || [], createdAt: r.createdAt })));
 });
 
@@ -1022,10 +1034,11 @@ button:hover{background:var(--navy-light)}
   <div id="sessionList"></div>
 </div>
 <div class="col" id="roomsPanel" style="display:none;width:340px;border-right:1px solid var(--border)">
-  <h2>Create Room</h2>
+  <h2>Manage Rooms (new, last 24h)</h2>
   <input id="newRoomName" placeholder="Room name e.g. cse103" style="margin-bottom:8px" />
   <textarea id="newRoomStudentIds" rows="4" placeholder="paste student IDs, one per line or comma separated" style="width:100%;box-sizing:border-box;background:#12141a;color:#e6e6e6;border:1px solid #2a2d34;border-radius:6px;padding:6px;font-size:12px"></textarea>
   <button id="createRoomBtn" style="margin-top:8px">Create Room</button>
+  <div id="roomList" style="margin-top:12px"></div>
 </div>
 <div class="col" id="oldRoomsPanel" style="display:none;width:340px;border-right:1px solid var(--border)">
   <h2>Old Rooms (manage, download, delete)</h2>
@@ -1256,6 +1269,7 @@ document.getElementById('roomsBtn').onclick = () => {
   document.getElementById('oldRoomsPanel').style.display = 'none';
   const el = document.getElementById('roomsPanel');
   el.style.display = el.style.display === 'none' ? 'block' : 'none';
+  if (el.style.display === 'block') loadRooms();
 };
 
 document.getElementById('oldRoomsBtn').onclick = () => {
@@ -1277,14 +1291,13 @@ document.getElementById('createRoomBtn').onclick = async () => {
   if (r.ok) {
     document.getElementById('newRoomName').value = '';
     document.getElementById('newRoomStudentIds').value = '';
-    alert('Room "' + roomName + '" created. Manage/download it under Old Rooms.');
+    loadRooms();
   }
   else { const d = await r.json(); alert(d.error || 'failed'); }
 };
 
-async function loadOldRooms(){
-  const rooms = await j('/admin/old-rooms');
-  const el = document.getElementById('oldRoomList');
+function renderRoomBoxes(rooms, listElId, apiBase, reload, showUnclaim) {
+  const el = document.getElementById(listElId);
   el.innerHTML = '';
   if (!rooms.length) { el.innerHTML = '<div style="color:#8a8f98;font-size:12px">No rooms yet.</div>'; return; }
   rooms.forEach(room => {
@@ -1302,7 +1315,7 @@ async function loadOldRooms(){
       '<button class="dlAllRoomBtn">Download All (this room)</button>' +
       '<button class="delDataBtn" style="background:#5a2b2b">Delete Room Data</button>' +
       '<button class="delRoomBtn" style="background:#5a2b2b">Delete Room</button>' +
-      '<button class="unclaimBtn">Hide from Students List</button>' +
+      (showUnclaim ? '<button class="unclaimBtn">Hide from Students List</button>' : '') +
       '</div>' +
       '<div class="roomIdList" style="margin-top:8px;display:flex;flex-direction:column;gap:4px"></div>';
     const idListEl = body.querySelector('.roomIdList');
@@ -1329,38 +1342,50 @@ async function loadOldRooms(){
       const ta = body.querySelector('textarea');
       const studentIds = ta.value;
       if (!studentIds.trim()) return;
-      await fetch('/admin/old-rooms/' + encodeURIComponent(room.roomName) + '/students', {
+      await fetch(apiBase + encodeURIComponent(room.roomName) + '/students', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ studentIds })
       });
-      loadOldRooms();
+      reload();
     };
     body.querySelector('.dlAllRoomBtn').onclick = () => {
-      window.location.href = '/admin/old-rooms/' + encodeURIComponent(room.roomName) + '/csv';
+      window.location.href = apiBase + encodeURIComponent(room.roomName) + '/csv';
     };
-    body.querySelector('.unclaimBtn').onclick = async () => {
-      await fetch('/admin/old-rooms/' + encodeURIComponent(room.roomName) + '/unclaim', { method: 'POST' });
-      loadOldRooms();
-      loadStudents();
-    };
+    if (showUnclaim) {
+      body.querySelector('.unclaimBtn').onclick = async () => {
+        await fetch(apiBase + encodeURIComponent(room.roomName) + '/unclaim', { method: 'POST' });
+        reload();
+        loadStudents();
+      };
+    }
     body.querySelector('.delDataBtn').onclick = async () => {
       if (!confirm('Delete ALL collected session/result data for every student in room "' + room.roomName + '"? This cannot be undone. The roster (allowed IDs) stays.')) return;
-      const r = await fetch('/admin/old-rooms/' + encodeURIComponent(room.roomName) + '/data', { method: 'DELETE' });
+      const r = await fetch(apiBase + encodeURIComponent(room.roomName) + '/data', { method: 'DELETE' });
       const d = await r.json();
       alert('Deleted ' + d.deletedSessions + ' sessions, ' + d.deletedResults + ' results.');
       loadStudents();
     };
     body.querySelector('.delRoomBtn').onclick = async () => {
       if (!confirm('Delete room "' + room.roomName + '"? Students in it will lose access to the extension and student panel. Their already-collected data is NOT deleted.')) return;
-      await fetch('/admin/old-rooms/' + encodeURIComponent(room.roomName), { method: 'DELETE' });
-      loadOldRooms();
+      await fetch(apiBase + encodeURIComponent(room.roomName), { method: 'DELETE' });
+      reload();
     };
     head.onclick = () => { body.style.display = body.style.display === 'none' ? 'block' : 'none'; };
     box.appendChild(head);
     box.appendChild(body);
     el.appendChild(box);
   });
+}
+
+async function loadRooms(){
+  const rooms = await j('/admin/rooms');
+  renderRoomBoxes(rooms, 'roomList', '/admin/rooms/', loadRooms, false);
+}
+
+async function loadOldRooms(){
+  const rooms = await j('/admin/old-rooms');
+  renderRoomBoxes(rooms, 'oldRoomList', '/admin/old-rooms/', loadOldRooms, true);
 }
 
 async function loadSessions(studentId){
