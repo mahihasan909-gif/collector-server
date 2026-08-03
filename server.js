@@ -435,6 +435,16 @@ app.delete('/admin/old-rooms/:roomName/data', checkAdmin, async (req, res) => {
   res.json({ ok: true, deletedSessions: sessRes.deletedCount, deletedResults: resRes.deletedCount });
 });
 
+app.get('/admin/old-rooms/:roomName/csv', checkAdmin, async (req, res) => {
+  const room = await assertOldRoom(req, res, req.params.roomName);
+  if (!room) return;
+  const docs = await sessionsCol.find({ studentId: { $in: room.studentIds || [] } }).toArray();
+  const parts = [CODE_CSV_COLUMNS.join(',')];
+  for (const doc of docs) parts.push(...buildCodeCsvRows(doc));
+  res.setHeader('Content-Disposition', `attachment; filename="${safeName(room.roomName)}_all.csv"`);
+  res.type('text/csv').send(parts.join('\n'));
+});
+
 app.post('/admin/rooms', checkAdmin, async (req, res) => {
   const roomName = (req.body?.roomName || '').toString().trim();
   if (!roomName) return res.status(400).json({ error: 'roomName required' });
@@ -499,6 +509,16 @@ app.delete('/admin/rooms/:roomName/data', checkAdmin, async (req, res) => {
   const sessRes = await sessionsCol.deleteMany({ studentId: { $in: ids } });
   const resRes = await resultsCol.deleteMany({ studentId: { $in: ids } });
   res.json({ ok: true, deletedSessions: sessRes.deletedCount, deletedResults: resRes.deletedCount });
+});
+
+app.get('/admin/rooms/:roomName/csv', checkAdmin, async (req, res) => {
+  const room = await assertOwnsRoom(req, res, req.params.roomName);
+  if (!room) return;
+  const docs = await sessionsCol.find({ studentId: { $in: room.studentIds || [] } }).toArray();
+  const parts = [CODE_CSV_COLUMNS.join(',')];
+  for (const doc of docs) parts.push(...buildCodeCsvRows(doc));
+  res.setHeader('Content-Disposition', `attachment; filename="${safeName(room.roomName)}_all.csv"`);
+  res.type('text/csv').send(parts.join('\n'));
 });
 
 function parseIdList(input) {
@@ -1261,6 +1281,7 @@ function renderRoomList(rooms, listElId, apiBase, reload) {
       '<textarea rows="3" placeholder="paste student IDs, one per line or comma separated" style="width:100%;box-sizing:border-box;background:#12141a;color:#e6e6e6;border:1px solid #2a2d34;border-radius:6px;padding:6px;font-size:12px"></textarea>' +
       '<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">' +
       '<button class="addIdsBtn">Add IDs</button>' +
+      '<button class="dlAllRoomBtn">Download All (this room)</button>' +
       '<button class="delDataBtn" style="background:#5a2b2b">Delete Room Data</button>' +
       '<button class="delRoomBtn" style="background:#5a2b2b">Delete Room</button>' +
       '</div>' +
@@ -1288,6 +1309,9 @@ function renderRoomList(rooms, listElId, apiBase, reload) {
       });
       reload();
     };
+    box.querySelector('.dlAllRoomBtn').onclick = () => {
+      window.location.href = apiBase + encodeURIComponent(room.roomName) + '/csv';
+    };
     box.querySelector('.delDataBtn').onclick = async () => {
       if (!confirm('Delete ALL collected session/result data for every student in room "' + room.roomName + '"? This cannot be undone. The roster (allowed IDs) stays.')) return;
       const r = await fetch(apiBase + encodeURIComponent(room.roomName) + '/data', { method: 'DELETE' });
@@ -1311,7 +1335,47 @@ async function loadRooms(){
 
 async function loadOldRooms(){
   const rooms = await j('/admin/old-rooms');
-  renderRoomList(rooms, 'oldRoomList', '/admin/old-rooms/', loadOldRooms);
+  const el = document.getElementById('oldRoomList');
+  el.innerHTML = '';
+  rooms.forEach(room => {
+    const box = document.createElement('div');
+    box.style.cssText = 'background:#1c1f26;border-radius:6px;padding:10px;margin-bottom:8px';
+    const head = document.createElement('div');
+    head.style.cssText = 'font-weight:bold;color:#e6e6e6;cursor:pointer;display:flex;justify-content:space-between;align-items:center';
+    head.innerHTML = '<span>' + room.roomName + '</span><span class="badge">' + room.studentIds.length + ' ids</span>';
+    const body = document.createElement('div');
+    body.style.cssText = 'display:none;margin-top:8px';
+    const dlAllBtn = document.createElement('button');
+    dlAllBtn.textContent = 'Download All (this room)';
+    dlAllBtn.onclick = () => { window.location.href = '/admin/old-rooms/' + encodeURIComponent(room.roomName) + '/csv'; };
+    body.appendChild(dlAllBtn);
+    const idListEl = document.createElement('div');
+    idListEl.style.cssText = 'margin-top:8px;display:flex;flex-direction:column;gap:4px';
+    room.studentIds.forEach((sid) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;font-size:12px;color:#e6e6e6';
+      const nameSpan = document.createElement('span');
+      nameSpan.textContent = sid;
+      nameSpan.style.cssText = 'cursor:pointer;text-decoration:underline';
+      nameSpan.onclick = () => {
+        document.querySelectorAll('#studentList .item').forEach(x=>x.classList.remove('active'));
+        loadSessions(sid);
+        currentFeedbackStudentId = sid;
+      };
+      const dlBtn = document.createElement('button');
+      dlBtn.textContent = 'CSV';
+      dlBtn.style.cssText = 'font-size:11px;padding:2px 8px';
+      dlBtn.onclick = () => { window.location.href = '/api/students/' + encodeURIComponent(sid) + '/sessions-csv'; };
+      row.appendChild(nameSpan);
+      row.appendChild(dlBtn);
+      idListEl.appendChild(row);
+    });
+    body.appendChild(idListEl);
+    head.onclick = () => { body.style.display = body.style.display === 'none' ? 'block' : 'none'; };
+    box.appendChild(head);
+    box.appendChild(body);
+    el.appendChild(box);
+  });
 }
 
 async function loadSessions(studentId){
