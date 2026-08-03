@@ -373,7 +373,9 @@ app.get('/api/download-all', checkAdmin, async (req, res) => {
 // --- rooms: whitelist of student IDs allowed to use extension + student panel, owned by one admin ---
 
 app.get('/admin/rooms', checkAdmin, async (req, res) => {
-  const rooms = await roomsCol.find({ ownerAdmin: req.adminUsername }).toArray();
+  const rooms = await roomsCol
+    .find({ $or: [{ ownerAdmin: req.adminUsername }, { ownerAdmin: { $exists: false } }, { ownerAdmin: '' }] })
+    .toArray();
   res.json(rooms.map((r) => ({ roomName: r.roomName, studentIds: r.studentIds || [], createdAt: r.createdAt })));
 });
 
@@ -401,7 +403,10 @@ app.post('/admin/rooms/:roomName/claim', checkAdmin, async (req, res) => {
 });
 
 async function assertOwnsRoom(req, res, roomName) {
-  const room = await roomsCol.findOne({ roomName, ownerAdmin: req.adminUsername });
+  const room = await roomsCol.findOne({
+    roomName,
+    $or: [{ ownerAdmin: req.adminUsername }, { ownerAdmin: { $exists: false } }, { ownerAdmin: '' }]
+  });
   if (!room) {
     res.status(404).json({ error: 'room not found' });
     return null;
@@ -414,21 +419,21 @@ app.post('/admin/rooms/:roomName/students', checkAdmin, async (req, res) => {
   if (!room) return;
   const ids = parseIdList(req.body?.studentIds);
   if (!ids.length) return res.status(400).json({ error: 'studentIds required' });
-  await roomsCol.updateOne({ roomName: room.roomName, ownerAdmin: req.adminUsername }, { $addToSet: { studentIds: { $each: ids } } });
+  await roomsCol.updateOne({ _id: room._id }, { $addToSet: { studentIds: { $each: ids } } });
   res.json({ ok: true, added: ids.length });
 });
 
 app.delete('/admin/rooms/:roomName/students/:studentId', checkAdmin, async (req, res) => {
   const room = await assertOwnsRoom(req, res, req.params.roomName);
   if (!room) return;
-  await roomsCol.updateOne({ roomName: room.roomName, ownerAdmin: req.adminUsername }, { $pull: { studentIds: req.params.studentId } });
+  await roomsCol.updateOne({ _id: room._id }, { $pull: { studentIds: req.params.studentId } });
   res.json({ ok: true });
 });
 
 app.delete('/admin/rooms/:roomName', checkAdmin, async (req, res) => {
   const room = await assertOwnsRoom(req, res, req.params.roomName);
   if (!room) return;
-  await roomsCol.deleteOne({ roomName: room.roomName, ownerAdmin: req.adminUsername });
+  await roomsCol.deleteOne({ _id: room._id });
   res.json({ ok: true });
 });
 
@@ -938,11 +943,6 @@ button:hover{background:var(--navy-light)}
   <input id="newRoomName" placeholder="Room name e.g. cse103" />
   <button id="createRoomBtn">Create Room</button>
   <div id="roomList" style="margin-top:12px"></div>
-  <div style="margin-top:18px;padding-top:12px;border-top:1px solid var(--border)">
-    <div style="font-size:12px;color:#8a8f98;margin-bottom:6px">Room name taken by an old unclaimed room? Claim it here.</div>
-    <input id="claimRoomName" placeholder="Existing room name to claim" />
-    <button id="claimRoomBtn">Claim Room</button>
-  </div>
 </div>
 <div class="col" id="detail">
   <h2>Session Detail</h2>
@@ -1181,15 +1181,6 @@ document.getElementById('createRoomBtn').onclick = async () => {
   });
   if (r.ok) { document.getElementById('newRoomName').value = ''; loadRooms(); }
   else { const d = await r.json(); alert(d.error || 'failed'); }
-};
-
-document.getElementById('claimRoomBtn').onclick = async () => {
-  const roomName = document.getElementById('claimRoomName').value.trim();
-  if (!roomName) return;
-  const r = await fetch('/admin/rooms/' + encodeURIComponent(roomName) + '/claim', { method: 'POST' });
-  const d = await r.json();
-  if (r.ok) { document.getElementById('claimRoomName').value = ''; loadRooms(); }
-  else { alert(d.error || 'failed'); }
 };
 
 async function loadRooms(){
