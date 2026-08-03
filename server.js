@@ -69,11 +69,6 @@ async function ownedStudentIds(adminUsername) {
   return ids;
 }
 
-function deptCodeOf(studentId) {
-  const parts = String(studentId).split('-');
-  return parts.length >= 3 ? parts[2] : '';
-}
-
 async function isStudentAllowed(studentId) {
   const room = await roomsCol.findOne({ studentIds: studentId });
   return Boolean(room);
@@ -299,10 +294,7 @@ app.get('/api/students', checkAdmin, async (req, res) => {
     cur.lastActivity = Math.max(cur.lastActivity, d.logoutAt || 0);
     byId.set(d.studentId, cur);
   }
-  let students = Array.from(byId.values());
-  if (req.query.dept) {
-    students = students.filter((s) => s.deptCode === req.query.dept);
-  }
+  const students = Array.from(byId.values());
   res.json(students);
 });
 
@@ -381,17 +373,15 @@ app.get('/api/download-all', checkAdmin, async (req, res) => {
 
 app.get('/admin/rooms', checkAdmin, async (req, res) => {
   const rooms = await roomsCol.find({ ownerAdmin: req.adminUsername }).toArray();
-  res.json(rooms.map((r) => ({ roomName: r.roomName, studentIds: r.studentIds || [], idPrefix: r.idPrefix || '', createdAt: r.createdAt })));
+  res.json(rooms.map((r) => ({ roomName: r.roomName, studentIds: r.studentIds || [], createdAt: r.createdAt })));
 });
 
 app.post('/admin/rooms', checkAdmin, async (req, res) => {
   const roomName = (req.body?.roomName || '').toString().trim();
   if (!roomName) return res.status(400).json({ error: 'roomName required' });
-  const idPrefix = (req.body?.idPrefix || '').toString().trim();
-  let ids = parseIdList(req.body?.studentIds);
-  if (idPrefix) ids = ids.filter((id) => deptCodeOf(id) === idPrefix);
+  const ids = parseIdList(req.body?.studentIds);
   try {
-    await roomsCol.insertOne({ roomName, studentIds: ids, idPrefix, ownerAdmin: req.adminUsername, createdAt: Date.now() });
+    await roomsCol.insertOne({ roomName, studentIds: ids, ownerAdmin: req.adminUsername, createdAt: Date.now() });
   } catch (err) {
     if (err.code === 11000) return res.status(409).json({ error: 'room already exists' });
     throw err;
@@ -421,12 +411,10 @@ async function assertOwnsRoom(req, res, roomName) {
 app.post('/admin/rooms/:roomName/students', checkAdmin, async (req, res) => {
   const room = await assertOwnsRoom(req, res, req.params.roomName);
   if (!room) return;
-  let ids = parseIdList(req.body?.studentIds);
+  const ids = parseIdList(req.body?.studentIds);
   if (!ids.length) return res.status(400).json({ error: 'studentIds required' });
-  const rejected = room.idPrefix ? ids.filter((id) => deptCodeOf(id) !== room.idPrefix) : [];
-  if (room.idPrefix) ids = ids.filter((id) => deptCodeOf(id) === room.idPrefix);
   await roomsCol.updateOne({ roomName: room.roomName }, { $addToSet: { studentIds: { $each: ids } } });
-  res.json({ ok: true, added: ids.length, rejected: rejected.length, rejectedIds: rejected });
+  res.json({ ok: true, added: ids.length });
 });
 
 app.delete('/admin/rooms/:roomName/students/:studentId', checkAdmin, async (req, res) => {
@@ -853,7 +841,6 @@ pre{background:#f7f9fd;border:1px solid var(--border);padding:10px;border-radius
 .file{margin-bottom:14px}
 .file h3{font-size:12px;color:var(--muted);margin:0 0 4px}
 .badge{display:inline-block;background:var(--navy);color:#fff;border-radius:10px;padding:1px 8px;font-size:10px;margin-left:6px;font-weight:600}
-#deptFilter{width:100%;box-sizing:border-box;margin-bottom:8px;padding:8px;background:#f7f9fd;border:1px solid var(--border);color:var(--text);border-radius:8px}
 input,textarea,select{font-family:inherit}
 button{background:var(--navy);color:#fff;border:none;border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer;margin-bottom:8px;font-weight:600;transition:background .15s}
 button:hover{background:var(--navy-light)}
@@ -937,7 +924,6 @@ button:hover{background:var(--navy-light)}
 </header>
 <div id="app">
 <div class="col" id="students"><h2>Students</h2>
-  <input id="deptFilter" placeholder="Dept code filter (blank = all)" value="" />
   <button id="downloadAllBtn">Download All (CSV)</button>
   <button id="roomsBtn">Manage Rooms</button>
   <div id="studentList"></div>
@@ -949,7 +935,6 @@ button:hover{background:var(--navy-light)}
 <div class="col" id="roomsPanel" style="display:none;width:340px;border-right:1px solid var(--border)">
   <h2>Rooms (allowed student IDs)</h2>
   <input id="newRoomName" placeholder="Room name e.g. cse103" />
-  <input id="newRoomIdPrefix" placeholder="ID prefix filter, e.g. 60 (blank = any dept)" />
   <button id="createRoomBtn">Create Room</button>
   <div id="roomList" style="margin-top:12px"></div>
 </div>
@@ -1156,9 +1141,7 @@ document.getElementById('logoutBtn').onclick = async () => {
 };
 
 async function loadStudents(){
-  const dept = document.getElementById('deptFilter').value.trim();
-  const url = '/api/students?dept=' + encodeURIComponent(dept);
-  const students = await j(url);
+  const students = await j('/api/students');
   allStudentIds = students.map((s) => s.studentId);
   const el = document.getElementById('studentList');
   el.innerHTML = '';
@@ -1172,7 +1155,6 @@ async function loadStudents(){
     el.appendChild(d);
   });
 }
-document.getElementById('deptFilter').addEventListener('input', loadStudents);
 document.getElementById('downloadAllBtn').onclick = () => {
   window.location.href = '/api/download-all';
 };
@@ -1185,14 +1167,13 @@ document.getElementById('roomsBtn').onclick = () => {
 
 document.getElementById('createRoomBtn').onclick = async () => {
   const roomName = document.getElementById('newRoomName').value.trim();
-  const idPrefix = document.getElementById('newRoomIdPrefix').value.trim();
   if (!roomName) return;
   const r = await fetch('/admin/rooms', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ roomName, studentIds: [], idPrefix })
+    body: JSON.stringify({ roomName, studentIds: [] })
   });
-  if (r.ok) { document.getElementById('newRoomName').value = ''; document.getElementById('newRoomIdPrefix').value = ''; loadRooms(); }
+  if (r.ok) { document.getElementById('newRoomName').value = ''; loadRooms(); }
   else { const d = await r.json(); alert(d.error || 'failed'); }
 };
 
@@ -1205,8 +1186,7 @@ async function loadRooms(){
     box.style.cssText = 'background:#1c1f26;border-radius:6px;padding:10px;margin-bottom:10px';
     box.innerHTML =
       '<div style="font-weight:bold;margin-bottom:4px">' + room.roomName +
-      '<span class="badge">' + room.studentIds.length + ' ids</span>' +
-      (room.idPrefix ? '<span class="badge">prefix ' + room.idPrefix + '</span>' : '') + '</div>' +
+      '<span class="badge">' + room.studentIds.length + ' ids</span></div>' +
       '<textarea rows="3" placeholder="paste student IDs, one per line or comma separated" style="width:100%;box-sizing:border-box;background:#12141a;color:#e6e6e6;border:1px solid #2a2d34;border-radius:6px;padding:6px;font-size:12px"></textarea>' +
       '<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">' +
       '<button class="addIdsBtn">Add IDs</button>' +
@@ -1223,10 +1203,6 @@ async function loadRooms(){
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ studentIds })
       });
-      const data = await r.json();
-      if (data.rejected) {
-        alert('Added ' + data.added + ', rejected ' + data.rejected + ' (dept prefix mismatch): ' + data.rejectedIds.join(', '));
-      }
       loadRooms();
     };
     box.querySelector('.delDataBtn').onclick = async () => {
